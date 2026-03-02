@@ -14,8 +14,9 @@
 #   RÈGLE : ajouter un service ici = ajouter sa variable ici ET dans entrypoint.sh.
 #
 # SERVICES ROUTÉS :
-#   auth, order, product, payment, cart → routes publiques exposées
-#   notification                        → aucune route publique (interne uniquement)
+#   auth, order, product, payment, cart  → routes publiques exposées
+#   admin                                → routes publiques exposées (JWT + requireAdmin côté service)
+#   notification                         → aucune route publique (interne uniquement)
 # ================================================================
 
 name: CI — Gateway
@@ -69,6 +70,7 @@ jobs:
             -e PAYMENT_SERVICE_HOST=ecom-watch-payment.onrender.com \
             -e CART_SERVICE_HOST=ecom-watch-cart.onrender.com \
             -e NOTIFICATION_SERVICE_HOST=ecom-watch-notification.onrender.com \
+            -e ADMIN_SERVICE_HOST=ecom-watch-admin.onrender.com \
             -e FRONTEND_DOMAIN=ecomwatch.vercel.app \
             nginx:1.25-alpine sh -c '
               set -e
@@ -76,10 +78,10 @@ jobs:
               mkdir -p /tmp/nginx/conf.d
 
               # Simulation exacte de entrypoint.sh
-              envsubst "${PORT} ${MONOLITH_URL} ${AUTH_SERVICE_HOST} ${ORDER_SERVICE_HOST} ${PRODUCT_SERVICE_HOST} ${PAYMENT_SERVICE_HOST} ${CART_SERVICE_HOST} ${NOTIFICATION_SERVICE_HOST} ${FRONTEND_DOMAIN}" \
+              envsubst "${PORT} ${MONOLITH_URL} ${AUTH_SERVICE_HOST} ${ORDER_SERVICE_HOST} ${PRODUCT_SERVICE_HOST} ${PAYMENT_SERVICE_HOST} ${CART_SERVICE_HOST} ${NOTIFICATION_SERVICE_HOST} ${ADMIN_SERVICE_HOST} ${FRONTEND_DOMAIN}" \
                 < /etc/nginx/src/nginx.conf > /tmp/nginx/nginx.conf
 
-              envsubst "${PORT} ${MONOLITH_URL} ${AUTH_SERVICE_HOST} ${ORDER_SERVICE_HOST} ${PRODUCT_SERVICE_HOST} ${PAYMENT_SERVICE_HOST} ${CART_SERVICE_HOST} ${NOTIFICATION_SERVICE_HOST} ${FRONTEND_DOMAIN}" \
+              envsubst "${PORT} ${MONOLITH_URL} ${AUTH_SERVICE_HOST} ${ORDER_SERVICE_HOST} ${PRODUCT_SERVICE_HOST} ${PAYMENT_SERVICE_HOST} ${CART_SERVICE_HOST} ${NOTIFICATION_SERVICE_HOST} ${ADMIN_SERVICE_HOST} ${FRONTEND_DOMAIN}" \
                 < /etc/nginx/src/conf.d/default.conf > /tmp/nginx/conf.d/default.conf
 
               cp /etc/nginx/src/conf.d/proxy_params.conf /tmp/nginx/conf.d/proxy_params.conf
@@ -112,8 +114,8 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ./gateway
-          file: ./gateway/docker/Dockerfile
+          file: ./gateway/Dockerfile
           push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=gateway
+          cache-to: type=gha,mode=max,scope=gateway
           tags: ecom-watch-gateway:ci

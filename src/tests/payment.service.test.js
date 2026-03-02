@@ -56,21 +56,13 @@ vi.mock('../config/database.js', () => ({
 // Mock repositories
 // -----------------------------------------------------------------------------
 vi.mock('../repositories/index.js', () => ({
-    ordersRepo: {
-        findById: vi.fn(),
-        updateStatus: vi.fn(),
-        listItems: vi.fn().mockResolvedValue([
-            { productName: 'Montre', price: 100, quantity: 1 }
-        ])
+    usersRepo: {
+        findById: vi.fn().mockResolvedValue({ id: 'user_abc', email: 'user@test.com' })
     },
-    inventoryRepo: { confirmSale: vi.fn() },
     paymentsRepo: {
         create: vi.fn().mockResolvedValue({ id: 'pay_1' }),
         updateByIntentId: vi.fn().mockResolvedValue({ id: 'pay_1', status: 'SUCCESS' })
     },
-    productsRepo: {
-        findById: vi.fn().mockResolvedValue({ id: 'p-1', name: 'Montre Test' })
-    }
 }));
 
 // -----------------------------------------------------------------------------
@@ -94,6 +86,8 @@ vi.mock('../clients/order.client.js', () => ({
     }
 }));
 
+// Le chemin doit pointer vers le client dans le monolith, pas dans l'order-service.
+// vi.mock() ci-dessus intercepte cet import — pas de vrai appel HTTP en test.
 import { paymentService } from '../services/payment.service.js';
 import { orderClient } from '../clients/order.client.js';
 import Stripe from 'stripe';

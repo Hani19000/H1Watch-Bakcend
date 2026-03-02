@@ -1,0 +1,254 @@
+# ================================================================
+# CI — Order Service
+#
+# Déclenché sur tout push/PR modifiant services/order/**
+# ou le fichier de config CI lui-même.
+#
+# PIPELINE :
+#   1. lint         → vérifie la syntaxe Node.js (fail-fast)
+#   2. unit-tests   → tests Vitest avec mocks (pas de DB ni Redis)
+#   3. integration  → tests avec PostgreSQL + Redis éphémères
+#                     schéma "order" créé et migré automatiquement
+#   4. build        → image Docker validée sans push
+# ================================================================
+
+name: CI — Order Service
+
+on:
+  push:
+    branches: [main, develop, "feature/**", "fix/**"]
+    paths:
+      - "services/order/**"
+      - ".github/workflows/ci-order.yaml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/order/**"
+
+# Annule les runs précédents sur la même branche pour économiser les minutes CI
+concurrency:
+  group: ci-order-${{ github.ref }}
+  cancel-in-progress: true
+
+# ── Variables globales ────────────────────────────────────────────────────────
+
+env:
+  NODE_VERSION: "22"
+  WORKING_DIR: ./services/order
+
+jobs:
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 1 — LINT
+  # Vérifie la syntaxe de tous les fichiers JS sans les exécuter.
+  # Fail-fast : inutile de lancer les tests si le code ne parse pas.
+  # ────────────────────────────────────────────────────────────────────────────
+
+  lint:
+    name: Lint & Syntax Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: ${{ env.WORKING_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.WORKING_DIR }}
+        run: npm ci
+
+      # node --check valide la syntaxe ESM sans exécuter les modules.
+      # Détecte les import manquants, les fautes de syntaxe, etc.
+      - name: Check Node.js syntax
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          find src -name "*.js" | xargs node --check
+          echo "Syntaxe OK"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 2 — UNIT TESTS
+  # Tests Vitest isolés — tous les accès DB/Redis/HTTP sont mockés.
+  # Couvre : orders.service, shipping.service, tax.service, clients HTTP.
+  # ────────────────────────────────────────────────────────────────────────────
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: ${{ env.WORKING_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.WORKING_DIR }}
+        run: npm ci
+
+      - name: Run unit tests with coverage
+        working-directory: ${{ env.WORKING_DIR }}
+        run: npm run test:coverage
+        env:
+          NODE_ENV: test
+          PORT: 3004
+          # Postgres — fake, mocké dans les tests unitaires
+          DATABASE_URL: postgresql://fake:fake@localhost/fake
+          # Redis — mocké dans les tests unitaires
+          REDIS_URL: redis://localhost:6379
+          # JWT — valeurs de test uniquement
+          JWT_ACCESS_SECRET: ci-access-secret-not-for-production
+          # Inter-services — valeurs de test uniquement
+          MONOLITH_URL: http://localhost:3000
+          INTERNAL_ORDER_SECRET: ci-order-secret-not-for-production
+          INTERNAL_AUTH_SECRET: ci-auth-secret-not-for-production
+          CLIENT_URL: http://localhost:5173
+          RESEND_API_KEY: re_test_placeholder
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-order-service
+          path: ${{ env.WORKING_DIR }}/coverage/
+          retention-days: 7
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 3 — INTEGRATION TESTS
+  # PostgreSQL 16 + Redis 7 en containers éphémères.
+  # Crée le schéma "order" et applique les deux migrations avant les tests.
+  #
+  # ISOLATION : schéma "order" dans une DB de test dédiée, détruite en fin de job.
+  # IDEMPOTENCE : les migrations utilisent IF NOT EXISTS — safe si re-run.
+  # ────────────────────────────────────────────────────────────────────────────
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: unit-tests
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: test_order_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: ${{ env.WORKING_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.WORKING_DIR }}
+        run: npm ci
+
+      # uuid_generate_v4() est requis par les tables. L'extension n'est pas
+      # activée par défaut sur PostgreSQL Alpine — on l'active avant les migrations.
+      - name: Enable uuid-ossp extension
+        run: |
+          PGPASSWORD=test_password psql \
+            -h localhost -U test_user -d test_order_db \
+            -c 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp";'
+          echo "Extension uuid-ossp activée"
+
+      # Le schéma "order" est un mot réservé SQL — les guillemets sont obligatoires.
+      - name: Create "order" schema
+        run: |
+          PGPASSWORD=test_password psql \
+            -h localhost -U test_user -d test_order_db \
+            -c 'CREATE SCHEMA IF NOT EXISTS "order";'
+          echo 'Schéma "order" créé'
+
+      # Migration 001 : tables orders, order_items, shipments + triggers
+      - name: Run migration 001 — order schema
+        run: |
+          PGPASSWORD=test_password psql \
+            -h localhost -U test_user -d test_order_db \
+            -v ON_ERROR_STOP=1 \
+            -f ${{ env.WORKING_DIR }}/migrations/001_order_schema.sql
+          echo "Migration 001 appliquée"
+
+      # Migration 002 : index de performance + fonction cleanup_abandoned_orders()
+      - name: Run migration 002 — indexes & cleanup function
+        run: |
+          PGPASSWORD=test_password psql \
+            -h localhost -U test_user -d test_order_db \
+            -v ON_ERROR_STOP=1 \
+            -f ${{ env.WORKING_DIR }}/migrations/002_order_indexes.sql
+          echo "Migration 002 appliquée"
+
+      - name: Run integration tests
+        working-directory: ${{ env.WORKING_DIR }}
+        run: npm run test:run -- --reporter=verbose
+        env:
+          NODE_ENV: test
+          PORT: 3004
+          # search_path="order" : les requêtes ciblent le schéma sans préfixe
+          DATABASE_URL: postgresql://test_user:test_password@localhost/test_order_db?options=--search_path%3D%22order%22
+          REDIS_URL: redis://localhost:6379
+          JWT_ACCESS_SECRET: ci-access-secret-not-for-production
+          MONOLITH_URL: http://localhost:3000
+          INTERNAL_ORDER_SECRET: ci-order-secret-not-for-production
+          INTERNAL_AUTH_SECRET: ci-auth-secret-not-for-production
+          CLIENT_URL: http://localhost:5173
+          RESEND_API_KEY: re_test_placeholder
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 4 — BUILD DOCKER
+  # Valide que l'image se construit sans erreur depuis le Dockerfile du service.
+  # push: false → aucun push vers un registry (CI only).
+  # Le cache GHA accélère les builds suivants (layers node_modules).
+  # ────────────────────────────────────────────────────────────────────────────
+
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: integration-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build order-service image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ env.WORKING_DIR }}
+          file: ${{ env.WORKING_DIR }}/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: ecom-watch-order-service:ci

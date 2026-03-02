@@ -1,0 +1,71 @@
+# ================================================================
+# CD — Auth Service
+#
+# Déploie l'auth-service sur Render via Deploy Hook
+# uniquement sur merge dans main, si les fichiers du service
+# ont changé.
+#
+# PRÉREQUIS — Secrets GitHub à créer :
+#   RENDER_AUTH_DEPLOY_HOOK → URL du deploy hook Render de l'auth-service
+#   (Settings → Secrets → Actions → New repository secret)
+#
+# COMMENT OBTENIR LE DEPLOY HOOK RENDER :
+#   Dashboard Render → ton service auth → Settings → Deploy Hook → Copy URL
+# ================================================================
+
+name: CD — Auth Service
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/auth/**"
+
+jobs:
+  deploy:
+    name: Deploy Auth Service → Render
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Vérification que le CI est passé sur ce commit ───────────────────
+      # Attend la conclusion des workflows CI avant de déployer.
+      # Évite de déployer un commit dont les tests auraient échoué en parallèle.
+      - name: Wait for CI to complete
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          check-name: "Build Docker Image"   # Nom du dernier job du CI
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 15                  # Vérifie toutes les 15 secondes
+          allowed-conclusions: success
+
+      # ── Déclenchement du déploiement Render ──────────────────────────────
+      # Le deploy hook déclenche un redéploiement du service sur Render.
+      # -w "%{http_code}" : capture le code HTTP pour détecter les erreurs.
+      # Un code != 200 fait échouer le step.
+      - name: Trigger Render Deploy Hook
+        run: |
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${{ secrets.RENDER_AUTH_DEPLOY_HOOK }}")
+          
+          echo "Render responded with HTTP $HTTP_CODE"
+          
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
+            echo "Deploy hook failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
+          
+          echo "Deploy triggered successfully"
+
+      # ── Notification de succès ───────────────────────────────────────────
+      - name: Deployment summary
+        run: |
+          echo "### Auth Service déployé ✅" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit** : \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch** : \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Auteur** : ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **URL** : https://ecom-watch-auth.onrender.com/health" >> $GITHUB_STEP_SUMMARY

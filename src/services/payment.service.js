@@ -9,23 +9,17 @@
  * - Traitement des webhooks (paiement réussi, session expirée, échec)
  * - Vérification du statut de paiement
  *
- * Hors-scope (délégué à OrderService) :
+ * Hors-scope (délégué à l'order-service via HTTP) :
+ * - Lecture et mise à jour des commandes
  * - Annulation de commande et libération de stock
+ * - Confirmation de la sortie de stock après paiement
  */
-import {
-    ordersRepo,
-    inventoryRepo,
-    paymentsRepo,
-    usersRepo,
-    productsRepo,
-} from '../repositories/index.js';
-import { orderService } from './orders.service.js';
+import { usersRepo } from '../repositories/index.js';
+import { orderClient } from '../clients/order.client.js';
 import { notificationService } from './notifications/notification.service.js';
 import { AppError, ValidationError } from '../utils/appError.js';
-import { cacheService } from './cache.service.js';
-import { pgPool } from '../config/database.js';
 import { HTTP_STATUS } from '../constants/httpStatus.js';
-import { ORDER_STATUS, PAYMENT_STATUS } from '../constants/enums.js';
+import { ORDER_STATUS } from '../constants/enums.js';
 import Stripe from 'stripe';
 import { ENV } from '../config/environment.js';
 import { logError, logInfo } from '../utils/logger.js';
@@ -45,16 +39,15 @@ class PaymentService {
 
     /**
      * Crée une session Stripe Checkout avec le montant global de la commande.
-     * Supporte les paiements guest et authentifiés.
+     * Délègue la lecture de la commande à l'order-service via HTTP.
      */
     async createSession(orderId, user = null) {
-        const order = await ordersRepo.findById(orderId);
+        // La commande (avec ses items) est lue depuis l'order-service
+        const order = await orderClient.findById(orderId);
 
         if (!order) {
             throw new AppError('Commande introuvable', HTTP_STATUS.NOT_FOUND);
         }
-
-        order.items = await ordersRepo.listItems(orderId);
 
         if (user && order.userId && order.userId !== user.id) {
             throw new AppError(
@@ -108,19 +101,14 @@ class PaymentService {
 
         const session = await this.stripe.checkout.sessions.create(sessionConfig);
 
-        await paymentsRepo.create({
-            orderId: order.id,
-            provider: 'STRIPE',
-            paymentIntentId: session.id,
-            status: PAYMENT_STATUS.PENDING,
-            amount: order.totalAmount,
-        });
+        logInfo(`Session Stripe créée — orderId: ${orderId}, sessionId: ${session.id}`);
 
         return session;
     }
 
     /**
      * Traite les événements Stripe de façon sécurisée via vérification de signature HMAC.
+     * La signature garantit que l'événement provient bien de Stripe et n'a pas été altéré.
      */
     async processStripeWebhook(rawBody, signature) {
         let event;
@@ -157,59 +145,36 @@ class PaymentService {
 
     /**
      * Gère la finalisation d'une session de paiement réussie.
-     * Toutes les mutations (commande + stock) sont dans une seule transaction SQL
-     * pour garantir la cohérence en cas d'erreur partielle.
+     * Délègue à l'order-service :
+     *   - mise à jour du statut PAID
+     *   - confirmation de stock (inventoryClient.confirmSale)
      */
     async _handleCheckoutCompleted(session) {
         const orderId = session.metadata.orderId;
         if (!orderId) return;
 
-        const client = await pgPool.connect();
-
         try {
-            await client.query('BEGIN');
+            await orderClient.markAsPaid(orderId, {
+                provider: 'STRIPE',
+                paymentIntentId: session.payment_intent,
+                amount: session.amount_total / 100,
+            });
 
-            await ordersRepo.updateStatus(
-                orderId,
-                ORDER_STATUS.PAID,
-                {
-                    provider: 'STRIPE',
-                    paymentIntentId: session.payment_intent,
-                    amount: session.amount_total / 100,
-                },
-                client
-            );
+            logInfo(`Paiement validé — orderId: ${orderId}`);
 
-            const items = await ordersRepo.listItems(orderId, client);
-
-            for (const item of items) {
-                await inventoryRepo.confirmSale(item.variantId, item.quantity, client);
-                cacheService.delete(`stock:variant:${item.variantId}`).catch(() => { });
-            }
-
-            await client.query('COMMIT');
-            logInfo(`Paiement validé et stock confirmé pour commande : ${orderId}`);
-
-            for (const item of items) {
-                this._invalidateProductCache(item.variantId).catch(() => { });
-            }
-
-            // Notifications hors transaction pour ne pas bloquer la DB.
+            // Notifications hors du flux principal pour ne pas bloquer Stripe.
             this._triggerPostPaymentNotifications(session, orderId).catch((err) =>
                 logError(err, { context: 'PaymentService.triggerPostPaymentNotifications', orderId })
             );
-
         } catch (error) {
-            await client.query('ROLLBACK');
             logError(error, { context: 'PaymentService.handleCheckoutCompleted', orderId });
             throw error;
-        } finally {
-            client.release();
         }
     }
 
     /**
      * Libère le stock réservé lorsqu'une session Stripe expire sans paiement.
+     * L'order-service gère la saga compensatoire (annulation + release stock).
      *
      * Déclencheurs :
      * - Stripe expire automatiquement la session après ~30 minutes d'inactivité
@@ -219,56 +184,21 @@ class PaymentService {
         const orderId = session.metadata?.orderId;
         if (!orderId) return;
 
-        const order = await ordersRepo.findById(orderId);
-
-        // Idempotence : si la commande est déjà traitée, on ignore l'événement.
-        if (!order || order.status === ORDER_STATUS.PAID || order.status === ORDER_STATUS.CANCELLED) {
-            logInfo(
-                `[Webhook] Session expirée ignorée — commande ${orderId} déjà en statut ${order?.status}`
-            );
-            return;
-        }
-
-        // Délégation à OrderService : responsable du cycle de vie de la commande.
-        await orderService.cancelOrderAndReleaseStock(orderId, 'checkout.session.expired');
-    }
-
-    /**
-     * Invalide le cache Redis d'un produit à partir d'un variantId.
-     * Récupère l'id et le slug du produit parent pour cibler les deux clés de cache.
-     */
-    async _invalidateProductCache(variantId) {
         try {
-            const variant = await productsRepo.findVariantById(variantId);
-            if (variant?.productId) {
-                const product = await productsRepo.findById(variant.productId);
-                if (product) {
-                    await cacheService.deleteMany([
-                        `product:details:${product.id}`,
-                        `product:details:${product.slug}`,
-                    ]);
-                    logInfo(`Cache produit invalidé après paiement : ${product.slug}`);
-                }
-            }
+            await orderClient.cancelOrder(orderId, 'checkout.session.expired');
+            logInfo(`Commande annulée (session expirée) — orderId: ${orderId}`);
         } catch (error) {
-            logError(error, { context: 'PaymentService.invalidateProductCache', variantId });
-        }
-    }
-
-    async _sendGuestOrderConfirmation(email, orderData) {
-        try {
-            const { emailService } = await import('./notifications/email.service.js');
-            const service = emailService?.sendOrderConfirmation ? emailService : emailService.default;
-            await service.sendOrderConfirmation(email, orderData);
-            logInfo(`Email de confirmation envoyé - orderId: ${orderData.id}`);
-        } catch (error) {
-            logError(error, { context: 'PaymentService.sendGuestOrderConfirmation', orderId: orderData.id });
+            // Ne pas propager l'erreur : la session est déjà expirée côté Stripe.
+            // Le cron de nettoyage prendra le relais si la commande reste PENDING.
+            logError(error, { context: 'PaymentService.handleCheckoutExpired', orderId });
         }
     }
 
     async _handlePaymentFailed(paymentIntent) {
         const orderId = paymentIntent.metadata?.orderId;
         if (!orderId) return;
+        // Pas d'action immédiate : Stripe retentera automatiquement.
+        logInfo(`Paiement échoué — orderId: ${orderId}`);
     }
 
     /**
@@ -276,7 +206,7 @@ class PaymentService {
      * L'email est requis en mode guest comme second facteur d'authentification.
      */
     async getPaymentStatus(orderId, user = null, guestEmail = null) {
-        const order = await ordersRepo.findById(orderId);
+        const order = await orderClient.findById(orderId);
 
         if (!order) {
             throw new AppError('Commande introuvable', HTTP_STATUS.NOT_FOUND);
@@ -296,7 +226,6 @@ class PaymentService {
         const orderEmail = order.shippingAddress?.email;
 
         if (!guestEmail || guestEmail.trim() === '') {
-            logError(new Error('Tentative accès guest sans email'), { orderId });
             throw new AppError(
                 'Accès interdit : Email requis pour vérifier le statut',
                 HTTP_STATUS.FORBIDDEN
@@ -304,38 +233,35 @@ class PaymentService {
         }
 
         if (!orderEmail || orderEmail.trim() === '') {
-            logError(new Error('Commande sans email dans shippingAddress'), { orderId });
             throw new AppError(
                 'Erreur système : Email de commande introuvable',
                 HTTP_STATUS.INTERNAL_SERVER_ERROR
             );
         }
 
-        const normalizedGuestEmail = guestEmail.trim().toLowerCase();
-        const normalizedOrderEmail = orderEmail.trim().toLowerCase();
-
-        if (normalizedGuestEmail !== normalizedOrderEmail) {
-            logError(new Error('Tentative accès guest avec email incorrect'), {
-                orderId,
-                attemptedEmailLength: guestEmail.length,
-                orderEmailLength: orderEmail.length,
-            });
+        if (guestEmail.trim().toLowerCase() !== orderEmail.trim().toLowerCase()) {
             throw new AppError(
                 'Accès interdit : Email ne correspond pas',
                 HTTP_STATUS.FORBIDDEN
             );
         }
 
-        logInfo(`Vérification statut guest autorisée - orderId: ${orderId}`);
         return order.status || ORDER_STATUS.PENDING;
     }
 
-    async getPaymentHistory(orderId) {
-        return await paymentsRepo.listByOrderId(orderId);
+    async _sendGuestOrderConfirmation(email, orderData) {
+        try {
+            const { emailService } = await import('./notifications/email.service.js');
+            const service = emailService?.sendOrderConfirmation ? emailService : emailService.default;
+            await service.sendOrderConfirmation(email, orderData);
+            logInfo(`Email de confirmation envoyé — orderId: ${orderData.id}`);
+        } catch (error) {
+            logError(error, { context: 'PaymentService.sendGuestOrderConfirmation', orderId: orderData.id });
+        }
     }
 
     async _triggerPostPaymentNotifications(session, orderId) {
-        const order = await ordersRepo.findById(orderId);
+        const order = await orderClient.findById(orderId);
         const isGuestCheckout = session.metadata.isGuestCheckout === 'true';
 
         if (isGuestCheckout) {
@@ -343,8 +269,7 @@ class PaymentService {
             if (customerEmail) await this._sendGuestOrderConfirmation(customerEmail, order);
         } else if (order.userId) {
             const user = await usersRepo.findById(order.userId);
-
-            if (user && user.email) {
+            if (user?.email) {
                 await notificationService.notifyOrderPaid(user.email, order);
             } else {
                 logError(

@@ -1,0 +1,160 @@
+# =============================================================================
+# WORKFLOW : Déploiement Continu (CD) — cart-service
+#
+# Déclenché uniquement sur les pushs vers main qui modifient le cart-service.
+#
+# Pipeline :
+#   migrate   -- applique la migration SQL du schéma "cart" sur Neon (production)
+#   deploy    -- déclenche le redéploiement du cart-service sur Render
+#
+# Infrastructure cible :
+#   Service   -- Render Web Service cart-service (port 3006)
+#   Base      -- Neon PostgreSQL — schéma "cart" isolé
+#   Cache     -- Redis Upstash — préfixe "cart:"
+#
+# Secrets GitHub requis (Settings > Secrets and variables > Actions) :
+#   NEON_DATABASE_URL_CART       -- connexion string Neon avec le rôle cart_user
+#                                   (ex: postgresql://cart_user:pass@ep-xxx.neon.tech/neondb?sslmode=require)
+#   RENDER_DEPLOY_HOOK_CART_URL  -- URL du deploy hook Render du cart-service
+#                                   (Render dashboard > cart-service > Settings > Deploy Hook)
+#   CART_SERVICE_URL             -- URL publique du cart-service sur Render
+#                                   (ex: https://ecom-watch-cart.onrender.com)
+# =============================================================================
+
+name: CD — cart-service
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'services/cart/**'
+      - '.github/workflows/cart-CD.yaml'
+
+# Un seul déploiement cart-service à la fois.
+# cancel-in-progress: false pour ne pas interrompre une migration en cours.
+concurrency:
+  group: cd-cart-production
+  cancel-in-progress: false
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # JOB 1 : MIGRATION NEON — SCHÉMA CART
+  #
+  # Applique la migration du schéma "cart" sur la base Neon de production.
+  # Le script SQL est idempotent (IF NOT EXISTS + ON CONFLICT DO NOTHING) :
+  # sans danger à rejouer sur une base qui a déjà le schéma.
+  #
+  # La migration s'exécute AVANT le déploiement Render pour garantir que
+  # le nouveau code trouve toujours un schéma compatible.
+  # ---------------------------------------------------------------------------
+  migrate:
+    name: Migration Neon — schéma cart
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Installation du client psql
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+
+      # Vérification de la connexion avant d'appliquer quoi que ce soit.
+      # Détecte une erreur de secret ou une indisponibilité Neon au plus tôt.
+      - name: Vérification de la connexion Neon (cart_user)
+        run: |
+          psql "${{ secrets.NEON_DATABASE_URL_CART }}" -c "SELECT current_user, current_database();"
+
+      # Le script crée le schéma "cart", les tables, les index et migre les données
+      # existantes depuis "order".carts si elles existent (IF EXISTS + INSERT ... ON CONFLICT).
+      - name: Migration 000 — schéma cart
+        run: |
+          psql "${{ secrets.NEON_DATABASE_URL_CART }}" \
+            -f services/cart/migrations/000_neon_add_cart.sql
+
+      # Vérification post-migration : les tables doivent exister.
+      - name: Vérification post-migration
+        run: |
+          psql "${{ secrets.NEON_DATABASE_URL_CART }}" -c \
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'cart' ORDER BY tablename;"
+
+
+  # ---------------------------------------------------------------------------
+  # JOB 2 : DÉPLOIEMENT RENDER
+  #
+  # Déclenche le redéploiement du cart-service via son deploy hook Render,
+  # uniquement après la réussite de la migration.
+  #
+  # Render récupère le dernier commit de main, rebuild l'image Docker
+  # depuis services/cart/Dockerfile, et redémarre le service.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Déploiement Render — cart-service
+    runs-on: ubuntu-latest
+    needs: migrate
+    environment: production
+
+    steps:
+      - name: Déclenchement du deploy hook Render
+        run: |
+          HTTP_STATUS=$(curl \
+            --silent \
+            --output /dev/null \
+            --write-out "%{http_code}" \
+            --request POST \
+            "${{ secrets.RENDER_DEPLOY_HOOK_CART_URL }}")
+
+          echo "Statut HTTP retourné par Render : $HTTP_STATUS"
+
+          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ] && [ "$HTTP_STATUS" != "202" ]; then
+            echo "Erreur : Render n'a pas accepté le deploy hook (HTTP $HTTP_STATUS)"
+            exit 1
+          fi
+
+          echo "Déploiement cart-service déclenché avec succès."
+
+      # Interroge /health toutes les 15s jusqu'à 5 minutes pour confirmer que le
+      # service est opérationnel après le redémarrage Render.
+      - name: Attente de la disponibilité du cart-service
+        run: |
+          SERVICE_URL="${{ secrets.CART_SERVICE_URL }}"
+          MAX_ATTEMPTS=20
+          WAIT_SECONDS=15
+
+          echo "Vérification de ${SERVICE_URL}/health (max ${MAX_ATTEMPTS} tentatives)"
+
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            HTTP_STATUS=$(curl \
+              --silent \
+              --output /dev/null \
+              --write-out "%{http_code}" \
+              --max-time 10 \
+              "${SERVICE_URL}/health" || echo "000")
+
+            if [ "$HTTP_STATUS" = "200" ]; then
+              echo "cart-service opérationnel après $i tentative(s)"
+              exit 0
+            fi
+
+            echo "Tentative $i/$MAX_ATTEMPTS — HTTP ${HTTP_STATUS} — prochaine dans ${WAIT_SECONDS}s"
+            sleep $WAIT_SECONDS
+          done
+
+          echo "Échec : le cart-service ne répond pas après $((MAX_ATTEMPTS * WAIT_SECONDS))s"
+          exit 1
+
+      # Résumé visible dans l'interface GitHub Actions (onglet Summary).
+      - name: Résumé du déploiement
+        if: success()
+        run: |
+          echo "### ✅ Déploiement cart-service réussi" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Champ     | Valeur |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit    | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Auteur    | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branche   | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Message   | ${{ github.event.head_commit.message }} |" >> $GITHUB_STEP_SUMMARY

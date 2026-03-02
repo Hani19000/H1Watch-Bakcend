@@ -1,0 +1,238 @@
+# ================================================================
+# CI — Auth Service
+#
+# Déclenché sur tout push/PR modifiant services/auth/**
+# ou les fichiers de config CI eux-mêmes.
+#
+# PIPELINE :
+#   1. lint         → vérifie la syntaxe (fail-fast)
+#   2. unit-tests   → tests unitaires Vitest (mocks, pas de DB)
+#   3. integration  → tests avec une vraie PostgreSQL éphémère
+#   4. build        → image Docker multi-stage (validation finale)
+# ================================================================
+
+name: CI — Auth Service
+
+on:
+  push:
+    branches: [main, develop, "feature/**", "fix/**"]
+    paths:
+      - "services/auth/**"
+      - ".github/workflows/ci-auth.yaml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/auth/**"
+
+# Annule les runs précédents sur la même branche pour économiser les minutes
+concurrency:
+  group: ci-auth-${{ github.ref }}
+  cancel-in-progress: true
+
+# ── Variables globales ────────────────────────────────────────────────────────
+
+env:
+  NODE_VERSION: "22"
+  WORKING_DIR: ./services/auth
+
+jobs:
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 1 — LINT
+  # Vérifie la syntaxe Node.js sans exécuter les tests.
+  # Fail-fast : inutile de lancer les tests si le code ne parse pas.
+  # ────────────────────────────────────────────────────────────────────────────
+
+  lint:
+    name: Lint & Syntax Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: ${{ env.WORKING_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.WORKING_DIR }}
+        run: npm ci
+
+      # node --check vérifie la syntaxe de tous les fichiers JS sans les exécuter
+      - name: Check Node.js syntax
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          find src -name "*.js" | xargs node --check
+          echo "Syntaxe OK"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 2 — UNIT TESTS
+  # Tests Vitest avec mocks — aucune dépendance externe (DB, Redis).
+  # Rapport de couverture uploadé comme artefact.
+  # ────────────────────────────────────────────────────────────────────────────
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: ${{ env.WORKING_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.WORKING_DIR }}
+        run: npm ci
+
+      - name: Run unit tests
+        working-directory: ${{ env.WORKING_DIR }}
+        run: npm run test:coverage
+        env:
+          NODE_ENV: test
+          # Variables minimales pour que les imports se chargent sans erreur
+          PORT: 3002
+          JWT_ACCESS_SECRET: test_access_secret_for_ci_only_not_production
+          JWT_REFRESH_SECRET: test_refresh_secret_for_ci_only_not_production
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379
+          CLIENT_URL: http://localhost:5173
+          ORDER_SERVICE_URL: http://localhost:3003
+          INTERNAL_SECRET: test_internal_secret_ci
+          DATABASE_URL: postgresql://fake:fake@localhost/fake
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: ${{ env.WORKING_DIR }}/coverage/
+          retention-days: 7
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 3 — INTEGRATION TESTS
+  # Lance une vraie PostgreSQL via service container.
+  # Applique les migrations auth puis exécute les tests d'intégration.
+  #
+  # ISOLATION : schéma `auth` créé dans une DB de test dédiée.
+  # NETTOYAGE : la DB est détruite à la fin du job (container éphémère).
+  # ────────────────────────────────────────────────────────────────────────────
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: unit-tests
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: test_auth_db
+        ports:
+          - 5432:5432
+        # Attend que PostgreSQL soit prêt avant de démarrer le job
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: ${{ env.WORKING_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.WORKING_DIR }}
+        run: npm ci
+
+      # Crée le schéma auth dans la DB de test avant d'appliquer les migrations
+      - name: Setup auth schema
+        run: |
+          PGPASSWORD=test_password psql \
+            -h localhost -U test_user -d test_auth_db \
+            -c "CREATE SCHEMA IF NOT EXISTS auth;"
+          echo "Schéma auth créé"
+
+      # Applique les migrations dans l'ordre
+      - name: Run migrations
+        run: |
+          PGPASSWORD=test_password psql \
+            -h localhost -U test_user -d test_auth_db \
+            -v ON_ERROR_STOP=1 \
+            -f ${{ env.WORKING_DIR }}/migrations/001_auth_schema.sql
+          
+          PGPASSWORD=test_password psql \
+            -h localhost -U test_user -d test_auth_db \
+            -v ON_ERROR_STOP=1 \
+            -f ${{ env.WORKING_DIR }}/migrations/002_indexes.sql
+          
+          echo "Migrations appliquées avec succès"
+
+      - name: Run integration tests
+        working-directory: ${{ env.WORKING_DIR }}
+        run: npm run test:run -- --reporter=verbose
+        env:
+          NODE_ENV: test
+          PORT: 3002
+          # search_path=auth : les requêtes ciblent le schéma auth sans préfixe
+          DATABASE_URL: postgresql://test_user:test_password@localhost/test_auth_db?options=--search_path%3Dauth
+          JWT_ACCESS_SECRET: test_access_secret_for_ci_only_not_production
+          JWT_REFRESH_SECRET: test_refresh_secret_for_ci_only_not_production
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379
+          CLIENT_URL: http://localhost:5173
+          ORDER_SERVICE_URL: http://localhost:3003
+          INTERNAL_SECRET: test_internal_secret_ci
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 4 — BUILD DOCKER
+  # Valide que l'image se construit correctement.
+  # push: false → l'image n'est pas envoyée sur un registry (CI only).
+  # Le cache GHA accélère les builds suivants.
+  # ────────────────────────────────────────────────────────────────────────────
+
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: integration-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build auth-service image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ env.WORKING_DIR }}
+          file: ${{ env.WORKING_DIR }}/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: ecom-watch-auth-service:ci

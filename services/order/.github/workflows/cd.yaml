@@ -1,0 +1,190 @@
+# ================================================================
+# CD — Order Service
+#
+# Déploie l'order-service sur Render via Deploy Hook
+# uniquement sur merge dans main, si les fichiers du service
+# ont changé.
+#
+# PIPELINE :
+#   1. migrate  → applique les migrations SQL sur Neon (schéma "order")
+#   2. deploy   → déclenche le redéploiement Render via deploy hook
+#
+# PRÉREQUIS — Secrets GitHub à créer :
+#   NEON_ORDER_DATABASE_URL      → connection string Neon du schéma "order"
+#                                   (DB dédiée ou même DB avec search_path="order")
+#   RENDER_ORDER_DEPLOY_HOOK     → URL du deploy hook Render de l'order-service
+#
+# COMMENT OBTENIR LE DEPLOY HOOK RENDER :
+#   Dashboard Render → service order → Settings → Deploy Hook → Copy URL
+#
+# COMMENT CRÉER LES SECRETS GITHUB :
+#   Repository → Settings → Secrets and variables → Actions → New repository secret
+# ================================================================
+
+name: CD — Order Service
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/order/**"
+
+# Un seul déploiement à la fois.
+# cancel-in-progress: false évite de laisser la DB dans un état intermédiaire
+# si deux merges arrivent rapidement.
+concurrency:
+  group: cd-order-production
+  cancel-in-progress: false
+
+jobs:
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 1 — MIGRATIONS NEON
+  #
+  # Applique les migrations du schéma "order" sur Neon avant le redéploiement.
+  # Si une migration échoue, le deploy hook n'est jamais déclenché.
+  #
+  # IDEMPOTENCE : les deux migrations utilisent IF NOT EXISTS — safe si re-run.
+  # ORDRE : 001 avant 002 (les index dépendent des tables).
+  # ────────────────────────────────────────────────────────────────────────────
+
+  migrate:
+    name: Migrations Neon — schéma "order"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installation du client psql
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+
+      # Vérification de la connexion avant toute migration.
+      # Détecte une erreur de secret ou une indisponibilité Neon immédiatement.
+      - name: Vérification de la connexion Neon
+        run: |
+          psql "${{ secrets.NEON_ORDER_DATABASE_URL }}" -c "SELECT version();"
+          echo "Connexion Neon OK"
+
+      # uuid_generate_v4() est requis par les tables orders et shipments.
+      # L'extension est activée une seule fois — idempotente.
+      - name: Activation de uuid-ossp
+        run: |
+          psql "${{ secrets.NEON_ORDER_DATABASE_URL }}" \
+            -c 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp";'
+          echo "Extension uuid-ossp OK"
+
+      # Crée le schéma "order" s'il n'existe pas encore.
+      # Nécessaire sur un déploiement initial vers une nouvelle DB Neon.
+      - name: Création du schéma "order"
+        run: |
+          psql "${{ secrets.NEON_ORDER_DATABASE_URL }}" \
+            -c 'CREATE SCHEMA IF NOT EXISTS "order";'
+          echo 'Schéma "order" OK'
+
+      # Migration 001 : tables orders, order_items, shipments, triggers, enums.
+      # Toutes les créations sont IF NOT EXISTS — safe sur une DB existante.
+      - name: Migration 001 — schéma order
+        run: |
+          psql "${{ secrets.NEON_ORDER_DATABASE_URL }}" \
+            -v ON_ERROR_STOP=1 \
+            -f services/order/migrations/001_order_schema.sql
+          echo "Migration 001 OK"
+
+      # Migration 002 : index CONCURRENTLY + fonction cleanup_abandoned_orders().
+      # CONCURRENTLY ne bloque pas les lectures/écritures sur Neon.
+      - name: Migration 002 — index et fonction cleanup
+        run: |
+          psql "${{ secrets.NEON_ORDER_DATABASE_URL }}" \
+            -v ON_ERROR_STOP=1 \
+            -f services/order/migrations/002_order_indexes.sql
+          echo "Migration 002 OK"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 2 — DÉPLOIEMENT RENDER
+  #
+  # Déclenche le redéploiement du service Render après la réussite des migrations.
+  # Render récupère le dernier commit de main, rebuild l'image depuis le Dockerfile
+  # et redémarre le container automatiquement.
+  #
+  # Le step "Wait for CI" attend que le CI (lint → tests → build) soit passé
+  # sur ce commit avant de déployer. Évite de déployer un commit cassé.
+  # ────────────────────────────────────────────────────────────────────────────
+
+  deploy:
+    name: Deploy Order Service → Render
+    runs-on: ubuntu-latest
+    needs: migrate
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Attend la conclusion du CI (dernier job = "Build Docker Image") sur ce SHA.
+      # Si le CI est déjà terminé avec succès, cette action retourne immédiatement.
+      - name: Wait for CI to complete
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          check-name: "Build Docker Image"   # Doit correspondre au name: du job build du CI
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 15
+          allowed-conclusions: success
+
+      # Déclenche le déploiement via le deploy hook Render.
+      # Render retourne 201 Created quand le déploiement est bien enregistré.
+      - name: Trigger Render Deploy Hook
+        run: |
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${{ secrets.RENDER_ORDER_DEPLOY_HOOK }}")
+
+          echo "Render responded with HTTP $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
+            echo "Deploy hook failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
+
+          echo "Deploy triggered successfully"
+
+      # Attend que l'order-service réponde sur /health.
+      # Vérifie toutes les 15s pendant 5 minutes max (cold start Render ~2-3min).
+      - name: Wait for order-service health check
+        run: |
+          SERVICE_URL="https://ecom-watch-order.onrender.com"
+          MAX_ATTEMPTS=20
+          WAIT_SECONDS=15
+
+          echo "Polling $SERVICE_URL/health (max ${MAX_ATTEMPTS} attempts)"
+
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            HTTP_STATUS=$(curl \
+              --silent \
+              --output /dev/null \
+              --write-out "%{http_code}" \
+              --max-time 10 \
+              "$SERVICE_URL/health" || echo "000")
+
+            if [ "$HTTP_STATUS" = "200" ]; then
+              echo "Order service is live after $i attempt(s) — HTTP $HTTP_STATUS"
+              exit 0
+            fi
+
+            echo "Attempt $i/$MAX_ATTEMPTS — HTTP ${HTTP_STATUS} — next in ${WAIT_SECONDS}s"
+            sleep $WAIT_SECONDS
+          done
+
+          echo "Timeout: order service did not respond after $((MAX_ATTEMPTS * WAIT_SECONDS))s"
+          exit 1
+
+      # Résumé visible dans l'interface GitHub Actions (onglet Summary)
+      - name: Deployment summary
+        if: success()
+        run: |
+          echo "### Order Service déployé ✅" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit** : \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch** : \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Auteur** : ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Health** : https://ecom-watch-order.onrender.com/health" >> $GITHUB_STEP_SUMMARY

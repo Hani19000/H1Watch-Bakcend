@@ -1,0 +1,119 @@
+# ================================================================
+# CI — API Gateway
+#
+# Déclenché uniquement si gateway/** est modifié.
+#
+# PIPELINE :
+#   1. validate  → vérifie la syntaxe Nginx avec envsubst complet
+#   2. build     → image Docker validée sans push
+#
+# COHÉRENCE :
+#   Le job validate simule exactement ce que fait entrypoint.sh
+#   en production : envsubst sur nginx.conf + default.conf avec
+#   toutes les variables d'environnement connues, puis nginx -t.
+#   RÈGLE : ajouter un service ici = ajouter sa variable ici ET dans entrypoint.sh.
+#
+# SERVICES ROUTÉS :
+#   auth, order, product, payment, cart → routes publiques exposées
+#   notification                        → aucune route publique (interne uniquement)
+# ================================================================
+
+name: CI — Gateway
+
+on:
+  push:
+    branches: [main, develop, "feature/**", "fix/**"]
+    paths:
+      - "gateway/**"
+      - ".github/workflows/ci-gateway.yaml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "gateway/**"
+
+concurrency:
+  group: ci-gateway-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 1 — VALIDATE NGINX CONFIG
+  #
+  # Simule exactement entrypoint.sh dans un container nginx:1.25-alpine :
+  #   1. envsubst remplace toutes les variables connues avec des valeurs fictives
+  #   2. nginx -t valide la syntaxe et la résolution des upstreams
+  #
+  # Ce test détecte :
+  #   - Une variable manquante dans envsubst (upstream vide → emerg)
+  #   - Une faute de syntaxe Nginx
+  #   - Un bloc location mal formé
+  # ────────────────────────────────────────────────────────────────────────────
+
+  validate:
+    name: Validate Nginx Config
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Nginx config with envsubst
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}/gateway/nginx:/etc/nginx/src:ro \
+            -e PORT=8080 \
+            -e MONOLITH_URL=ecom-watch.onrender.com \
+            -e AUTH_SERVICE_HOST=ecom-watch-auth.onrender.com \
+            -e ORDER_SERVICE_HOST=ecom-watch-order.onrender.com \
+            -e PRODUCT_SERVICE_HOST=ecom-watch-product.onrender.com \
+            -e PAYMENT_SERVICE_HOST=ecom-watch-payment.onrender.com \
+            -e CART_SERVICE_HOST=ecom-watch-cart.onrender.com \
+            -e NOTIFICATION_SERVICE_HOST=ecom-watch-notification.onrender.com \
+            -e FRONTEND_DOMAIN=ecomwatch.vercel.app \
+            nginx:1.25-alpine sh -c '
+              set -e
+
+              mkdir -p /tmp/nginx/conf.d
+
+              # Simulation exacte de entrypoint.sh
+              envsubst "${PORT} ${MONOLITH_URL} ${AUTH_SERVICE_HOST} ${ORDER_SERVICE_HOST} ${PRODUCT_SERVICE_HOST} ${PAYMENT_SERVICE_HOST} ${CART_SERVICE_HOST} ${NOTIFICATION_SERVICE_HOST} ${FRONTEND_DOMAIN}" \
+                < /etc/nginx/src/nginx.conf > /tmp/nginx/nginx.conf
+
+              envsubst "${PORT} ${MONOLITH_URL} ${AUTH_SERVICE_HOST} ${ORDER_SERVICE_HOST} ${PRODUCT_SERVICE_HOST} ${PAYMENT_SERVICE_HOST} ${CART_SERVICE_HOST} ${NOTIFICATION_SERVICE_HOST} ${FRONTEND_DOMAIN}" \
+                < /etc/nginx/src/conf.d/default.conf > /tmp/nginx/conf.d/default.conf
+
+              cp /etc/nginx/src/conf.d/proxy_params.conf /tmp/nginx/conf.d/proxy_params.conf
+
+              # Vérifie qu il ne reste aucune variable non substituée
+              if grep -r "\${" /tmp/nginx/; then
+                echo "ERREUR : des variables non substituées sont présentes dans la config"
+                exit 1
+              fi
+
+              nginx -t -c /tmp/nginx/nginx.conf
+              echo "Config Nginx valide"
+            '
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 2 — BUILD DOCKER IMAGE
+  # ────────────────────────────────────────────────────────────────────────────
+
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: validate
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build Gateway image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./gateway
+          file: ./gateway/docker/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: ecom-watch-gateway:ci

@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: ecom-watch-auth
+    runtime: node
+    rootDir: services/auth
+    buildCommand: npm ci
+    startCommand: node src/server.js
+    envVars:
+      - key: NODE_ENV
+        value: production

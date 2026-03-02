@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import { requestLogger } from './middlewares/logger.middleware.js';
 import { errorHandler } from './middlewares/erroHandler.middleware.js';
 import v1Router from './routes/index.routes.js';
+import internalRoutes from './routes/internal.routes.js';
 import {
     helmetMiddleware,
     corsMiddleware,
@@ -66,7 +67,20 @@ app.use('/images', express.static(path.join(__dirname, 'public/images'), {
 }));
 
 // ─────────────────────────────────────────────────────────────────────
-// ROUTES API
+// ROUTES INTER-SERVICES — /internal/*
+//
+// Montées à la RACINE de l'app (pas sous /api/v1) pour que l'order-service
+// puisse appeler ${MONOLITH_URL}/internal/inventory/reserve directement.
+//
+// Ces routes ne passent JAMAIS par le Gateway (bloquées par nginx :
+//   location ~ ^/internal/ { return 404; }
+// Elles ne sont accessibles qu'en réseau interne Render (service-to-service).
+// ─────────────────────────────────────────────────────────────────────
+
+app.use('/internal', internalRoutes);
+
+// ─────────────────────────────────────────────────────────────────────
+// ROUTES API PUBLIQUES ET AUTHENTIFIÉES
 // Le rate limiter général est appliqué dans index.routes.js —
 // l'appliquer ici en plus provoquerait un double comptage sur /api/v1.
 // ─────────────────────────────────────────────────────────────────────

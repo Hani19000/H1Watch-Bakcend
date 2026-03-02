@@ -1,0 +1,37 @@
+{
+  "name": "ecom-watch-auth-service",
+  "version": "1.0.0",
+  "description": "Auth microservice — gestion des utilisateurs, sessions et tokens",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "lint": "echo 'Aucun linter configuré' && exit 0"
+  },
+  "dependencies": {
+    "@sentry/node": "^10.38.0",
+    "@sentry/profiling-node": "^10.38.0",
+    "compression": "^1.8.1",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
+    "dotenv": "^17.2.4",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.2.1",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.3",
+    "node-cron": "^4.2.1",
+    "pg": "^8.18.0",
+    "redis": "^5.10.0",
+    "resend": "^6.9.2"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.0.18",
+    "nodemon": "^3.1.11",
+    "supertest": "^7.2.2",
+    "vitest": "^4.0.18"
+  }
+}

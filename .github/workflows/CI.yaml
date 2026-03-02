@@ -145,6 +145,14 @@ jobs:
       # Sentry -- valeur fictive pour passer la validation
       SENTRY_DSN: https://public@sentry.example.com/1
 
+      # Inter-services -- order-service
+      # Valeurs fictives de test uniquement (jamais utilisées en production).
+      # Nécessaires car order.client.js lit process.env.ORDER_SERVICE_URL
+      # et buildHeaders() lit process.env.INTERNAL_ORDER_SECRET au moment
+      # de chaque appel HTTP — undefined provoque "Failed to parse URL".
+      ORDER_SERVICE_URL: http://localhost:3004
+      INTERNAL_ORDER_SECRET: ci-order-secret-not-for-production
+
 
     steps:
       - name: Checkout

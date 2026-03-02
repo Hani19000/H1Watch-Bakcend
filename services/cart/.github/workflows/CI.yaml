@@ -1,0 +1,210 @@
+# =============================================================================
+# WORKFLOW : Intégration Continue (CI)
+#
+# Déclenché sur chaque push et pull request vers main et develop.
+#
+# Pipeline :
+#   lint   -- vérification statique ESLint
+#   test   -- tests unitaires (mocks complets, pas de vraie DB pour le cart)
+#             + tests d'intégration monolith avec PostgreSQL 15 et Redis 7
+#   build  -- vérification que l'image Docker se construit sans erreur
+#
+# "test" et "build" ne démarrent que si "lint" réussit.
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+# Annule les runs en cours si un nouveau commit arrive sur la même branche.
+# Évite de consommer des minutes de CI sur du code déjà remplacé.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # JOB 1 : LINT
+  # Vérification statique rapide, sans service externe.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Installation des dépendances
+        run: npm ci
+
+      - name: ESLint
+        run: npm run lint
+
+
+  # ---------------------------------------------------------------------------
+  # JOB 2 : TESTS
+  #
+  # Démarre PostgreSQL 15-alpine et Redis 7-alpine comme services Docker
+  # natifs du runner pour les tests d'intégration du monolith.
+  #
+  # Les tests du cart-service sont unitaires (mocks complets) : ils n'ont
+  # pas besoin de vraie DB. Mais environment.js du cart-service exige que
+  # certaines variables soient définies dans process.env au moment du
+  # chargement du module (même si elles ne sont jamais utilisées en test).
+  # Ces variables sont déclarées ici pour satisfaire cette contrainte.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+
+    services:
+
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ecom_watch_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ecom_watch_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      NODE_ENV: test
+
+      # ── Monolith (PostgreSQL + variables applicatives) ──────────────────────
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ecom_watch_test
+
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+
+      JWT_ACCESS_SECRET: ci-access-secret-not-for-production
+      JWT_REFRESH_SECRET: ci-refresh-secret-not-for-production
+      JWT_ACCESS_EXPIRES_IN: 15m
+      JWT_REFRESH_EXPIRES_IN: 7d
+
+      STRIPE_SECRET_KEY: sk_test_placeholder
+      STRIPE_WEBHOOK_SECRET: whsec_placeholder
+
+      CLOUDINARY_CLOUD_NAME: test
+      CLOUDINARY_API_KEY: test
+      CLOUDINARY_API_SECRET: test
+
+      RESEND_API_KEY: re_test_placeholder
+      EMAIL_FROM: noreply@ecom-watch.local
+
+      CLIENT_URL: http://localhost:3000
+      PORT: 3001
+
+      SENTRY_DSN: https://public@sentry.example.com/1
+
+      # ── cart-service ────────────────────────────────────────────────────────
+      # Requises par services/cart/src/config/environment.js au chargement du
+      # module. Vitest est lancé depuis la racine du monorepo : le vitest.config.js
+      # de services/cart/ n'est PAS lu dans ce contexte — seul ce bloc env s'applique.
+      #
+      # Les tests cart-service mockent toutes les dépendances via vi.mock() :
+      # ces valeurs ne déclenchent aucun appel réel à la DB ou au product-service.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ecom_watch_test
+      REDIS_URL: redis://localhost:6379
+      PRODUCT_SERVICE_URL: http://localhost:3003
+      INTERNAL_PRODUCT_SECRET: ci-cart-internal-secret-not-for-production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Installation des dépendances
+        run: npm ci
+
+      - name: Initialisation du schéma
+        run: |
+          PGPASSWORD=postgres psql \
+            -h localhost \
+            -U postgres \
+            -d ecom_watch_test \
+            -f init-postgres.sql
+
+      - name: Application de la migration 002
+        run: |
+          PGPASSWORD=postgres psql \
+            -h localhost \
+            -U postgres \
+            -d ecom_watch_test \
+            -f migrations/002_production_optimizations.sql
+
+      - name: Exécution des tests
+        run: npm test
+
+      - name: Upload couverture Codecov
+        uses: codecov/codecov-action@v4
+        if: always()
+        continue-on-error: true
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+
+  # ---------------------------------------------------------------------------
+  # JOB 3 : BUILD DOCKER
+  # Détecte les erreurs de Dockerfile avant qu'elles atteignent Render.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build Docker
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (vérification sans push)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -73,14 +73,15 @@ jobs:
       # init-postgres.sql est idempotent grâce aux clauses IF NOT EXISTS
       # et ON CONFLICT DO NOTHING sur les données de seed.
       # Sans risque d'appliquer deux fois sur une base existante.
-      - name: Migration 001 -- schéma initial
-        run: psql "${{ secrets.NEON_DATABASE_URL }}" -f init-postgres.sql
+      # - name: Migration 001 -- schéma initial
+      #   run: psql "${{ secrets.NEON_DATABASE_URL }}" -f init-postgres.sql
 
       # 002 est idempotent grâce à CREATE INDEX CONCURRENTLY IF NOT EXISTS
       # et CREATE TABLE IF NOT EXISTS sur toutes ses créations.
-      - name: Migration 002 -- optimisations production
-        run: psql "${{ secrets.NEON_DATABASE_URL }}" -f migrations/002_production_optimizations.sql
-
+      # - name: Migration 002 -- optimisations production
+      #   run: psql "${{ secrets.NEON_DATABASE_URL }}" -f migrations/002_production_optimizations.sql
+      - name: Migrations terminées
+        run: echo "Aucune migration en attente pour ce déploiement."
 
   # ---------------------------------------------------------------------------
   # JOB 2 : DEPLOIEMENT RENDER

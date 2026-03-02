@@ -22,6 +22,7 @@ class QueueService {
 
         this.queue = new Queue(QUEUE_NAMES.NOTIFICATIONS, {
             connection: redisConnection,
+            prefix: 'notification',
             defaultJobOptions: {
                 // Backoff exponentiel pour limiter la pression sur Resend en cas d'erreur
                 attempts: ENV.queue.maxAttempts,

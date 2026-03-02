@@ -1,13 +1,12 @@
 /**
- * @module Middlewares/Internal — auth-service
+ * @module Middleware/Internal — auth-service
  *
- * Protège les routes /internal/* en vérifiant le header X-Internal-Secret.
+ * Protège les routes `/internal/*` en vérifiant le header `X-Internal-Secret`.
  *
- * Ces routes ne sont jamais exposées via le Gateway Nginx —
- * elles sont exclusivement appelées par l'admin-service.
- *
- * La comparaison timing-safe prévient les attaques par analyse temporelle
- * qui permettraient de deviner le secret caractère par caractère.
+ * Ces routes ne transitent jamais par le Gateway Nginx — elles sont exclusivement
+ * appelées par des services pairs sur le réseau interne Render.
+ * La comparaison timing-safe prévient les attaques temporelles qui permettraient
+ * de deviner le secret caractère par caractère.
  */
 import crypto from 'crypto';
 import { ENV } from '../config/environment.js';
@@ -18,8 +17,8 @@ const HEADER_NAME = 'x-internal-secret';
 
 /**
  * Comparaison en temps constant pour éviter les attaques temporelles.
- * Un padding factice est exécuté même si les longueurs diffèrent,
- * afin de ne pas révéler si le secret est trop court ou trop long.
+ * Un padding factice est exécuté même si les longueurs diffèrent
+ * afin de garantir un temps de traitement constant.
  */
 const timingSafeEqual = (provided, expected) => {
     try {
@@ -38,11 +37,10 @@ const timingSafeEqual = (provided, expected) => {
 };
 
 /**
- * Valide les appels entrants depuis l'admin-service.
- * Utilise INTERNAL_AUTH_SECRET — l'admin-service doit envoyer cette valeur
- * dans le header X-Internal-Secret.
+ * Génère un middleware de validation du secret interne.
+ * Factorisé pour permettre plusieurs périmètres de confiance distincts.
  */
-export const fromAdminService = (req, res, next) => {
+const validateSecret = (expectedSecret) => (req, res, next) => {
     const provided = req.headers[HEADER_NAME];
 
     if (!provided) {
@@ -52,9 +50,8 @@ export const fromAdminService = (req, res, next) => {
         });
     }
 
-    const expected = ENV.services.internalSecret;
-
-    if (!expected || !timingSafeEqual(provided, expected)) {
+    if (!timingSafeEqual(provided, expectedSecret)) {
+        // Ne pas révéler si le header existe mais est incorrect.
         logError(new Error('Tentative accès interne avec secret invalide'), {
             context: 'auth-service.internal.middleware',
             ip: req.ip,
@@ -69,3 +66,9 @@ export const fromAdminService = (req, res, next) => {
 
     next();
 };
+
+/**
+ * Valide les appels entrants depuis l'admin-service.
+ * Utilise `INTERNAL_ADMIN_SECRET` — secret partagé uniquement avec l'admin-service.
+ */
+export const fromAdminService = validateSecret(ENV.internal.adminSecret);

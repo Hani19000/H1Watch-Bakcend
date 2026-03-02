@@ -94,6 +94,14 @@ export const ENV = Object.freeze({
         orderServiceUrl: process.env.ORDER_SERVICE_URL,
     },
 
+    // Valeurs lues par security.js — ne pas supprimer sans mettre à jour security.js.
+    rateLimit: {
+        windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 min
+        max: Number(process.env.RATE_LIMIT_MAX) || 100,
+        authWindowMs: Number(process.env.AUTH_RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
+        authMax: Number(process.env.AUTH_RATE_LIMIT_MAX) || 5,
+    },
+
     cors: {
         origins: process.env.CORS_ORIGINS?.split(',').map((o) => o.trim()) || [
             'http://localhost:5173',

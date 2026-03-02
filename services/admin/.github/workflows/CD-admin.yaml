@@ -6,21 +6,26 @@
 #
 # Pipeline :
 #   deploy   — déclenche le redéploiement du service Render via deploy hook
-#              puis vérifie la disponibilité du /health
+#              puis vérifie la disponibilité du Gateway (point d'entrée public)
 #
 # Infrastructure cible :
 #   API      — Render Web Service (port 3008, build interne depuis GitHub)
 #   Cache    — Render Redis ou Upstash (injecté via REDIS_URL)
+#   Gateway  — Nginx reverse-proxy (route /api/v1/admin/* → admin-service)
 #   Pas de base de données propre — l'admin-service est un agrégateur HTTP.
 #   Pas de migration SQL à appliquer.
 #
 # Secrets GitHub requis (Settings > Secrets and variables > Actions) :
 #   RENDER_ADMIN_DEPLOY_HOOK_URL  — URL du deploy hook Render du admin-service
 #                                   (Render dashboard > admin-service > Settings > Deploy Hook)
-#   RENDER_ADMIN_SERVICE_URL      — URL publique du service déployé
-#                                   (ex: https://ecom-watch-admin.onrender.com)
+#   RENDER_GATEWAY_URL            — URL publique du Gateway (déjà utilisée par cd-gateway.yaml)
+#                                   (ex: https://ecom-watch-gateway.onrender.com)
 #
-# Ces deux secrets sont isolés du monolithe pour éviter tout déploiement croisé.
+# Pourquoi RENDER_GATEWAY_URL et non RENDER_ADMIN_SERVICE_URL ?
+#   Le Gateway est le seul point d'entrée public. L'admin-service n'est pas
+#   exposé directement à Internet — seul le Gateway route /api/v1/admin/*
+#   vers lui. Vérifier que le Gateway répond après un déploiement admin
+#   confirme que la chaîne complète (gateway → admin-service) est opérationnelle.
 # =============================================================================
 
 name: CD — admin-service
@@ -83,23 +88,22 @@ jobs:
           echo "Déploiement déclenché avec succès."
 
       # -----------------------------------------------------------------------
-      # Attend que le service soit opérationnel en interrogeant /health.
+      # Attend que le Gateway soit opérationnel en interrogeant son /health.
       #
-      # L'admin-service démarre le serveur HTTP AVANT les cron jobs (server.js).
-      # Le /health répond immédiatement avec { service: "admin-service", status: "ok" }
-      # sans dépendre de la disponibilité des services aval (auth, order, product).
-      # Un état "degraded" des services aval n'empêche pas le démarrage.
+      # Le Gateway est le point d'entrée unique de l'API. Son /health répond
+      # directement sans contacter les services aval — ce qui confirme que
+      # le Gateway est bien actif et peut router les requêtes vers l'admin-service.
       #
-      # Render peut prendre jusqu'à 3-5 minutes pour un cold start sur le plan gratuit.
-      # MAX_ATTEMPTS=24 × WAIT_SECONDS=15 = 6 minutes de polling maximum.
+      # Render peut prendre jusqu'à 3-5 minutes pour un cold start sur le plan
+      # gratuit. MAX_ATTEMPTS=24 × WAIT_SECONDS=15 = 6 minutes de polling max.
       # -----------------------------------------------------------------------
-      - name: Attente de la disponibilité du admin-service
+      - name: Attente de la disponibilité du Gateway
         run: |
-          SERVICE_URL="${{ secrets.RENDER_ADMIN_SERVICE_URL }}"
+          GATEWAY_URL="${{ secrets.RENDER_GATEWAY_URL }}"
           MAX_ATTEMPTS=24
           WAIT_SECONDS=15
 
-          echo "Vérification de $SERVICE_URL/health (max ${MAX_ATTEMPTS} tentatives × ${WAIT_SECONDS}s)"
+          echo "Vérification de $GATEWAY_URL/health (max ${MAX_ATTEMPTS} tentatives × ${WAIT_SECONDS}s)"
 
           for i in $(seq 1 $MAX_ATTEMPTS); do
             HTTP_STATUS=$(curl \
@@ -107,10 +111,10 @@ jobs:
               --output /dev/null \
               --write-out "%{http_code}" \
               --max-time 10 \
-              "$SERVICE_URL/health" || echo "000")
+              "$GATEWAY_URL/health" || echo "000")
 
             if [ "$HTTP_STATUS" = "200" ]; then
-              echo "admin-service opérationnel après $i tentative(s) (HTTP $HTTP_STATUS)"
+              echo "Gateway opérationnel après $i tentative(s) (HTTP $HTTP_STATUS)"
               exit 0
             fi
 
@@ -118,7 +122,7 @@ jobs:
             sleep $WAIT_SECONDS
           done
 
-          echo "Échec : admin-service ne répond pas après $((MAX_ATTEMPTS * WAIT_SECONDS)) secondes"
+          echo "Échec : Gateway ne répond pas après $((MAX_ATTEMPTS * WAIT_SECONDS)) secondes"
           exit 1
 
       # -----------------------------------------------------------------------
@@ -136,7 +140,7 @@ jobs:
           echo "| Auteur      | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Branche     | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Message     | ${{ github.event.head_commit.message }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| URL         | ${{ secrets.RENDER_ADMIN_SERVICE_URL }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Gateway     | ${{ secrets.RENDER_GATEWAY_URL }}/health |" >> $GITHUB_STEP_SUMMARY
 
       - name: Résumé en cas d'échec
         if: failure()

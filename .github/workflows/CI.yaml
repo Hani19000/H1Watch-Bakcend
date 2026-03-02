@@ -1,47 +1,122 @@
 # =============================================================================
-# WORKFLOW : CI global — ECOM-WATCH Monorepo
+# WORKFLOW : CI — Validation globale du monorepo
 #
-# Ce fichier est conservé pour les vérifications globales (gateway, lint racine).
-# Chaque microservice a son propre workflow CI dédié avec filtres de chemin :
-#   ci-auth.yaml      → services/auth/**
-#   ci-products.yaml  → services/products/**
-#   ci-order.yaml     → services/order/**
-#   ci-payment.yaml   → services/payment/**
-#   ci-cart.yaml      → services/cart/**
-#   ci-gateway.yaml   → gateway/**
+# Ce workflow remplace l'ancien CI du monolith, qui est supprimé.
+# Chaque microservice possède son propre CI déclenché sur son répertoire :
+#   services/auth/.github/workflows/CI.yaml
+#   services/order/.github/workflows/ci.yaml
+#   services/products/.github/workflows/CI.yaml
+#   services/payment/.github/workflows/CI.yaml
+#   services/notification/.github/workflows/CI.yaml
+#   services/cart/.github/workflows/CI.yaml
+#   services/admin/.github/workflows/CI-admin.yaml
+#   gateway/.github/workflows/ci-gateway.yaml
 #
-# Le monolith a été supprimé — ce fichier ne lance plus ses tests.
+# Ce workflow valide uniquement les fichiers partagés à la racine du monorepo
+# (render.yaml, docker-compose.yml, migrations SQL, scripts de configuration).
 # =============================================================================
 
-name: CI — Global
+name: CI — Monorepo
 
 on:
   push:
-    branches: [main, develop]
+    branches:
+      - main
+      - develop
+    # Déclenché uniquement si des fichiers hors services/ changent.
+    # Les changements dans services/* sont pris en charge par les CI par service.
+    paths-ignore:
+      - 'services/**'
+      - 'gateway/**'
   pull_request:
-    branches: [main, develop]
+    branches:
+      - main
+      - develop
+    paths-ignore:
+      - 'services/**'
+      - 'gateway/**'
 
 concurrency:
-  group: ci-global-${{ github.ref }}
+  group: ci-monorepo-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
 
-  # Validation rapide que le repo reste cohérent (pas de lock files en conflit, etc.)
-  sanity-check:
-    name: Sanity Check
+  # ---------------------------------------------------------------------------
+  # VALIDATION SQL — vérifie la syntaxe des migrations partagées.
+  #
+  # Les migrations à la racine (init-postgres.sql, migrations/) peuvent encore
+  # être utilisées pour les tests d'intégration locaux ou une future base partagée.
+  # Cette étape détecte les erreurs de syntaxe SQL avant un merge.
+  # ---------------------------------------------------------------------------
+  validate-sql:
+    name: Validate SQL migrations
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ecom_watch_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ecom_watch_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Vérifie qu'init-postgres.sql est syntaxiquement valide.
+      # ON_ERROR_STOP=1 interrompt à la première erreur SQL.
+      - name: Validate init-postgres.sql
+        run: |
+          PGPASSWORD=postgres psql \
+            -h localhost \
+            -U postgres \
+            -d ecom_watch_test \
+            -v ON_ERROR_STOP=1 \
+            -f init-postgres.sql
+          echo "init-postgres.sql OK"
+
+      # Vérifie les migrations dans l'ordre de numérotation.
+      # Cette commande est idempotente grâce aux IF NOT EXISTS.
+      - name: Validate migration 002
+        run: |
+          PGPASSWORD=postgres psql \
+            -h localhost \
+            -U postgres \
+            -d ecom_watch_test \
+            -v ON_ERROR_STOP=1 \
+            -f migrations/002_production_optimizations.sql
+          echo "migration 002 OK"
+
+  # ---------------------------------------------------------------------------
+  # VALIDATION render.yaml — vérifie que le manifeste de déploiement est valide.
+  # Détecte les erreurs YAML avant qu'elles atteignent Render.
+  # ---------------------------------------------------------------------------
+  validate-render-yaml:
+    name: Validate render.yaml
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Vérification de la structure du monorepo
+      - name: Validate render.yaml syntax
         run: |
-          echo "Services présents :"
-          ls services/
-          echo "Gateway présent :"
-          ls gateway/
-          echo "Workflows CI présents :"
-          ls .github/workflows/ci-*.yaml
-          echo "Workflows CD présents :"
-          ls .github/workflows/cd-*.yaml
+          python3 -c "
+          import yaml, sys
+          with open('render.yaml') as f:
+              try:
+                  yaml.safe_load(f)
+                  print('render.yaml: syntaxe valide')
+              except yaml.YAMLError as e:
+                  print(f'render.yaml: erreur YAML — {e}')
+                  sys.exit(1)
+          "

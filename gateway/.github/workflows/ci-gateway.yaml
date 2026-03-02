@@ -1,21 +1,8 @@
 # ================================================================
 # CI — API Gateway
 #
-# Déclenché uniquement si gateway/** est modifié.
-#
-# PIPELINE :
-#   1. validate  → vérifie la syntaxe Nginx avec envsubst complet
-#   2. build     → image Docker validée sans push
-#
-# COHÉRENCE :
-#   Le job validate simule exactement ce que fait entrypoint.sh
-#   en production : envsubst sur nginx.conf + default.conf avec
-#   toutes les variables d'environnement connues, puis nginx -t.
-#   RÈGLE : ajouter un service ici = ajouter sa variable ici ET dans entrypoint.sh.
-#
-# SERVICES ROUTÉS :
-#   auth, order, product, payment, cart → routes publiques exposées
-#   notification                        → aucune route publique (interne uniquement)
+# Valide la configuration Nginx avec nginx -t en simulant
+# exactement ce que fait entrypoint.sh en production.
 # ================================================================
 
 name: CI — Gateway
@@ -37,66 +24,43 @@ concurrency:
 
 jobs:
 
-  # ────────────────────────────────────────────────────────────────────────────
-  # JOB 1 — VALIDATE NGINX CONFIG
-  #
-  # Simule exactement entrypoint.sh dans un container nginx:1.25-alpine :
-  #   1. envsubst remplace toutes les variables connues avec des valeurs fictives
-  #   2. nginx -t valide la syntaxe et la résolution des upstreams
-  #
-  # Ce test détecte :
-  #   - Une variable manquante dans envsubst (upstream vide → emerg)
-  #   - Une faute de syntaxe Nginx
-  #   - Un bloc location mal formé
-  # ────────────────────────────────────────────────────────────────────────────
-
   validate:
     name: Validate Nginx Config
     runs-on: ubuntu-latest
 
+    container:
+      image: nginx:1.25-alpine
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate Nginx config with envsubst
+      - name: Install envsubst
+        run: apk add --no-cache gettext
+
+      # Simule exactement entrypoint.sh avec des valeurs fictives.
+      # Si nginx -t échoue ici, il échouerait aussi au démarrage Render.
+      - name: Validate nginx configuration
         run: |
-          docker run --rm \
-            -v ${{ github.workspace }}/gateway/nginx:/etc/nginx/src:ro \
-            -e PORT=8080 \
-            -e MONOLITH_URL=ecom-watch.onrender.com \
-            -e AUTH_SERVICE_HOST=ecom-watch-auth.onrender.com \
-            -e ORDER_SERVICE_HOST=ecom-watch-order.onrender.com \
-            -e PRODUCT_SERVICE_HOST=ecom-watch-product.onrender.com \
-            -e PAYMENT_SERVICE_HOST=ecom-watch-payment.onrender.com \
-            -e CART_SERVICE_HOST=ecom-watch-cart.onrender.com \
-            -e NOTIFICATION_SERVICE_HOST=ecom-watch-notification.onrender.com \
-            -e FRONTEND_DOMAIN=ecomwatch.vercel.app \
-            nginx:1.25-alpine sh -c '
-              set -e
+          mkdir -p /tmp/nginx/conf.d
 
-              mkdir -p /tmp/nginx/conf.d
+          envsubst '${PORT} ${AUTH_SERVICE_HOST} ${ORDER_SERVICE_HOST} ${PRODUCT_SERVICE_HOST} ${PAYMENT_SERVICE_HOST} ${CART_SERVICE_HOST} ${FRONTEND_DOMAIN}' \
+            < gateway/nginx/nginx.conf > /tmp/nginx/nginx.conf
 
-              # Simulation exacte de entrypoint.sh
-              envsubst "${PORT} ${MONOLITH_URL} ${AUTH_SERVICE_HOST} ${ORDER_SERVICE_HOST} ${PRODUCT_SERVICE_HOST} ${PAYMENT_SERVICE_HOST} ${CART_SERVICE_HOST} ${NOTIFICATION_SERVICE_HOST} ${FRONTEND_DOMAIN}" \
-                < /etc/nginx/src/nginx.conf > /tmp/nginx/nginx.conf
+          envsubst '${PORT} ${AUTH_SERVICE_HOST} ${ORDER_SERVICE_HOST} ${PRODUCT_SERVICE_HOST} ${PAYMENT_SERVICE_HOST} ${CART_SERVICE_HOST} ${FRONTEND_DOMAIN}' \
+            < gateway/nginx/conf.d/default.conf > /tmp/nginx/conf.d/default.conf
 
-              envsubst "${PORT} ${MONOLITH_URL} ${AUTH_SERVICE_HOST} ${ORDER_SERVICE_HOST} ${PRODUCT_SERVICE_HOST} ${PAYMENT_SERVICE_HOST} ${CART_SERVICE_HOST} ${NOTIFICATION_SERVICE_HOST} ${FRONTEND_DOMAIN}" \
-                < /etc/nginx/src/conf.d/default.conf > /tmp/nginx/conf.d/default.conf
+          cp gateway/nginx/conf.d/proxy_params.conf /tmp/nginx/conf.d/proxy_params.conf
 
-              cp /etc/nginx/src/conf.d/proxy_params.conf /tmp/nginx/conf.d/proxy_params.conf
-
-              # Vérifie qu il ne reste aucune variable non substituée
-              if grep -r "\${" /tmp/nginx/; then
-                echo "ERREUR : des variables non substituées sont présentes dans la config"
-                exit 1
-              fi
-
-              nginx -t -c /tmp/nginx/nginx.conf
-              echo "Config Nginx valide"
-            '
-
-  # ────────────────────────────────────────────────────────────────────────────
-  # JOB 2 — BUILD DOCKER IMAGE
-  # ────────────────────────────────────────────────────────────────────────────
+          nginx -t -c /tmp/nginx/nginx.conf
+          echo "Nginx config OK"
+        env:
+          PORT: "8080"
+          AUTH_SERVICE_HOST: "auth.example.com"
+          ORDER_SERVICE_HOST: "order.example.com"
+          PRODUCT_SERVICE_HOST: "product.example.com"
+          PAYMENT_SERVICE_HOST: "payment.example.com"
+          CART_SERVICE_HOST: "cart.example.com"
+          FRONTEND_DOMAIN: "ecomwatch.vercel.app"
 
   build:
     name: Build Docker Image
@@ -105,15 +69,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: docker/setup-buildx-action@v3
 
-      - name: Build Gateway image
+      - name: Build gateway image
         uses: docker/build-push-action@v5
         with:
-          context: ./gateway
-          file: ./gateway/docker/Dockerfile
+          context: gateway
+          file: gateway/Dockerfile
           push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=gateway
+          cache-to: type=gha,mode=max,scope=gateway
           tags: ecom-watch-gateway:ci

@@ -1,0 +1,50 @@
+# =============================================================================
+# CD — notification-service
+# Secret requis : RENDER_NOTIFICATION_DEPLOY_HOOK
+# =============================================================================
+
+name: CD — notification-service
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/notification/**"
+      - ".github/workflows/cd-notification.yaml"
+
+concurrency:
+  group: cd-notification-production
+  cancel-in-progress: false
+
+jobs:
+
+  deploy:
+    name: Deploy notification-service → Render
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wait for CI to complete
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          check-name: "Build Docker Image"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 15
+          allowed-conclusions: success
+      - name: Trigger Render Deploy Hook
+        run: |
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${{ secrets.RENDER_NOTIFICATION_DEPLOY_HOOK }}")
+          echo "Render responded with HTTP $HTTP_CODE"
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then exit 1; fi
+      - name: Wait for notification-service health check
+        run: |
+          for i in $(seq 1 20); do
+            HTTP=$(curl --silent --output /dev/null --write-out "%{http_code}" --max-time 10 "https://ecom-watch-notification.onrender.com/health" || echo "000")
+            if [ "$HTTP" = "200" ]; then exit 0; fi
+            echo "Attempt $i/20 — HTTP $HTTP — next in 15s"; sleep 15
+          done; exit 1
+      - name: Deployment summary
+        if: success()
+        run: echo "### notification-service déployé ✅" >> $GITHUB_STEP_SUMMARY

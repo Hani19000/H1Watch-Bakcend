@@ -1,0 +1,90 @@
+# =============================================================================
+# CD — order-service
+# Pipeline : migrate (Neon) → deploy (Render)
+# Secrets requis : NEON_ORDER_DATABASE_URL, RENDER_ORDER_DEPLOY_HOOK
+# =============================================================================
+
+name: CD — order-service
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/order/**"
+      - ".github/workflows/cd-order.yaml"
+
+concurrency:
+  group: cd-order-production
+  cancel-in-progress: false
+
+jobs:
+
+  migrate:
+    name: Migrations Neon — schéma "order"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Installation du client psql
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+      - name: Vérification de la connexion Neon
+        run: psql "${{ secrets.NEON_ORDER_DATABASE_URL }}" -c "SELECT version();"
+      - name: Activation de uuid-ossp
+        run: |
+          psql "${{ secrets.NEON_ORDER_DATABASE_URL }}" \
+            -c 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp";'
+      - name: Création du schéma "order"
+        run: |
+          psql "${{ secrets.NEON_ORDER_DATABASE_URL }}" \
+            -c 'CREATE SCHEMA IF NOT EXISTS "order";'
+      - name: Migration 001 — schéma order
+        run: |
+          psql "${{ secrets.NEON_ORDER_DATABASE_URL }}" \
+            -v ON_ERROR_STOP=1 \
+            -f services/order/migrations/001_order_schema.sql
+      - name: Migration 002 — index et fonction cleanup
+        run: |
+          psql "${{ secrets.NEON_ORDER_DATABASE_URL }}" \
+            -v ON_ERROR_STOP=1 \
+            -f services/order/migrations/002_order_indexes.sql
+
+  deploy:
+    name: Deploy order-service → Render
+    runs-on: ubuntu-latest
+    needs: migrate
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wait for CI to complete
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          check-name: "Build Docker Image"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 15
+          allowed-conclusions: success
+      - name: Trigger Render Deploy Hook
+        run: |
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${{ secrets.RENDER_ORDER_DEPLOY_HOOK }}")
+          echo "Render responded with HTTP $HTTP_CODE"
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
+            echo "Deploy hook failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
+      - name: Wait for order-service health check
+        run: |
+          SERVICE_URL="https://ecom-watch-order.onrender.com"
+          for i in $(seq 1 20); do
+            HTTP_STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" --max-time 10 "$SERVICE_URL/health" || echo "000")
+            if [ "$HTTP_STATUS" = "200" ]; then echo "order-service live after $i attempt(s)"; exit 0; fi
+            echo "Attempt $i/20 — HTTP $HTTP_STATUS — next in 15s"
+            sleep 15
+          done
+          echo "Timeout: order-service did not respond"
+          exit 1
+      - name: Deployment summary
+        if: success()
+        run: |
+          echo "### order-service déployé ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit** : \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Auteur** : ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY

@@ -1,14 +1,17 @@
-# ================================================================
-# CD — Auth Service
-# ================================================================
+# =============================================================================
+# CD — auth-service
+# Déploie sur Render via Deploy Hook après passage du CI.
+# Secret requis : RENDER_AUTH_DEPLOY_HOOK
+# =============================================================================
 
-name: CD — Auth Service
+name: CD — auth-service
 
 on:
   push:
     branches: [main]
     paths:
       - "services/auth/**"
+      - ".github/workflows/cd-auth.yaml"
 
 concurrency:
   group: cd-auth-production
@@ -17,13 +20,13 @@ concurrency:
 jobs:
 
   deploy:
-    name: Deploy Auth Service → Render
+    name: Deploy auth-service → Render
     runs-on: ubuntu-latest
     environment: production
-
     steps:
       - uses: actions/checkout@v4
 
+      # Attend que le CI (Build Docker Image) soit passé sur ce SHA avant de déployer.
       - name: Wait for CI to complete
         uses: lewagon/wait-on-check-action@v1.3.4
         with:
@@ -50,6 +53,6 @@ jobs:
       - name: Deployment summary
         if: success()
         run: |
-          echo "### Auth Service déployé ✅" >> $GITHUB_STEP_SUMMARY
+          echo "### auth-service déployé ✅" >> $GITHUB_STEP_SUMMARY
           echo "- **Commit** : \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Auteur** : ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY

@@ -1,8 +1,9 @@
-# ================================================================
-# CI — Order Service
-# ================================================================
+# =============================================================================
+# CI — order-service
+# Pipeline : lint → unit-tests → integration-tests → build Docker
+# =============================================================================
 
-name: CI — Order Service
+name: CI — order-service
 
 on:
   push:
@@ -14,6 +15,7 @@ on:
     branches: [main, develop]
     paths:
       - "services/order/**"
+      - ".github/workflows/ci-order.yaml"
 
 concurrency:
   group: ci-order-${{ github.ref }}
@@ -67,11 +69,13 @@ jobs:
           DATABASE_URL: postgresql://fake:fake@localhost/fake
           REDIS_URL: redis://localhost:6379
           JWT_ACCESS_SECRET: ci-access-secret-not-for-production
+          MONOLITH_URL: http://localhost:3000
           INTERNAL_ORDER_SECRET: ci-order-secret-not-for-production
           INTERNAL_AUTH_SECRET: ci-auth-secret-not-for-production
           CLIENT_URL: http://localhost:5173
           RESEND_API_KEY: re_test_placeholder
-      - uses: actions/upload-artifact@v4
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: coverage-order-service
@@ -82,7 +86,6 @@ jobs:
     name: Integration Tests
     runs-on: ubuntu-latest
     needs: unit-tests
-
     services:
       postgres:
         image: postgres:16-alpine
@@ -106,7 +109,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -148,6 +150,7 @@ jobs:
           DATABASE_URL: postgresql://test_user:test_password@localhost/test_order_db?options=--search_path%3D%22order%22
           REDIS_URL: redis://localhost:6379
           JWT_ACCESS_SECRET: ci-access-secret-not-for-production
+          MONOLITH_URL: http://localhost:3000
           INTERNAL_ORDER_SECRET: ci-order-secret-not-for-production
           INTERNAL_AUTH_SECRET: ci-auth-secret-not-for-production
           CLIENT_URL: http://localhost:5173

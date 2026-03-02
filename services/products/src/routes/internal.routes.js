@@ -14,7 +14,7 @@
  * │   POST /internal/inventory/release           → order-service             │
  * │   POST /internal/inventory/confirm           → order-service             │
  * ├──────────────────────────────────────────────────────────────────────────┤
- * │ fromAdminService (INTERNAL_ADMIN_SECRET)                                 │
+ * │ fromAdminService (INTERNAL_ADMIN_SECR../repositories/index.js         │
  * │   GET  /internal/stats                       → admin-service             │
  * └──────────────────────────────────────────────────────────────────────────┘
  *

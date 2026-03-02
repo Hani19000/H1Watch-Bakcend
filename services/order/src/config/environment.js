@@ -21,6 +21,7 @@ const requiredEnv = [
     'INTERNAL_PRODUCT_SECRET',    // Secret partagé avec le product-service (stock + variants)
     'INTERNAL_ORDER_SECRET',      // Secret partagé avec le monolith (payment webhook)
     'INTERNAL_AUTH_SECRET',       // Secret partagé avec l'auth-service (autoClaimGuestOrders)
+    'INTERNAL_ADMIN_SECRET',      // Secret partagé avec l'admin-service (stats + crons dashboard)
     // Notification-service — emails transactionnels déportés (expédition, livraison, annulation)
     'NOTIFICATION_SERVICE_URL',
     'INTERNAL_NOTIFICATION_SECRET',
@@ -112,6 +113,8 @@ export const ENV = Object.freeze({
         orderSecret: process.env.INTERNAL_ORDER_SECRET,
         // Utilisé pour les appels entrants depuis l'auth-service
         authSecret: process.env.INTERNAL_AUTH_SECRET,
+        // Utilisé pour les appels entrants depuis l'admin-service (stats + crons)
+        adminSecret: process.env.INTERNAL_ADMIN_SECRET,
         // Utilisé pour les appels vers le product-service (inventory + variants)
         productSecret: process.env.INTERNAL_PRODUCT_SECRET,
         // Utilisé pour les appels vers le notification-service

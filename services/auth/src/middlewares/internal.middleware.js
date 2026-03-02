@@ -1,14 +1,12 @@
 /**
- * @module Middleware/Internal — product-service
+ * @module Middleware/Internal — auth-service
  *
  * Protège les routes `/internal/*` en vérifiant le header `X-Internal-Secret`.
  *
- * Ces routes ne transitent jamais par le Gateway Nginx.
- * La comparaison timing-safe prévient les attaques temporelles.
- *
- * Deux périmètres de confiance distincts :
- * - `fromInternalService` → order-service, cart-service, payment-service
- * - `fromAdminService`    → admin-service (stats dashboard uniquement)
+ * Ces routes ne transitent jamais par le Gateway Nginx — elles sont exclusivement
+ * appelées par des services pairs sur le réseau interne Render.
+ * La comparaison timing-safe prévient les attaques temporelles qui permettraient
+ * de deviner le secret caractère par caractère.
  */
 import crypto from 'crypto';
 import { ENV } from '../config/environment.js';
@@ -40,8 +38,7 @@ const timingSafeEqual = (provided, expected) => {
 
 /**
  * Génère un middleware de validation du secret interne.
- * Factorisé pour supporter plusieurs périmètres de confiance
- * sans dupliquer la logique de vérification.
+ * Factorisé pour permettre plusieurs périmètres de confiance distincts.
  */
 const validateSecret = (expectedSecret) => (req, res, next) => {
     const provided = req.headers[HEADER_NAME];
@@ -53,9 +50,10 @@ const validateSecret = (expectedSecret) => (req, res, next) => {
         });
     }
 
-    if (!expectedSecret || !timingSafeEqual(provided, expectedSecret)) {
+    if (!timingSafeEqual(provided, expectedSecret)) {
+        // Ne pas révéler si le header existe mais est incorrect.
         logError(new Error('Tentative accès interne avec secret invalide'), {
-            context: 'product-service.internal.middleware',
+            context: 'auth-service.internal.middleware',
             ip: req.ip,
             path: req.originalUrl,
         });
@@ -70,13 +68,7 @@ const validateSecret = (expectedSecret) => (req, res, next) => {
 };
 
 /**
- * Valide les appels entrants depuis les services pairs (order, cart, payment).
- * Utilise `INTERNAL_PRODUCT_SECRET`.
- */
-export const fromInternalService = validateSecret(ENV.internalSecret);
-
-/**
  * Valide les appels entrants depuis l'admin-service.
- * Utilise `INTERNAL_ADMIN_SECRET` — secret distinct pour isoler le périmètre admin.
+ * Utilise `INTERNAL_ADMIN_SECRET` — secret partagé uniquement avec l'admin-service.
  */
-export const fromAdminService = validateSecret(ENV.adminSecret);
+export const fromAdminService = validateSecret(ENV.internal.adminSecret);

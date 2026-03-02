@@ -1,6 +1,22 @@
 # ================================================================
 # CD — API Gateway
-# Déploiement sur Render via Deploy Hook sur merge main
+#
+# Déploie le Gateway sur Render via Deploy Hook sur merge main.
+#
+# COHÉRENCE :
+#   Même structure que cd-auth, cd-order, cd-product, cd-payment, cd-notification.
+#   - Attend la fin du CI avant de déployer
+#   - Vérifie le /health après déploiement
+#   - Résumé GitHub Actions
+#
+# SERVICES ROUTÉS :
+#   auth, order, product, payment, cart → routes publiques exposées
+#   notification                        → aucune route publique (interne uniquement)
+#                                         var NOTIFICATION_SERVICE_HOST requise
+#
+# PRÉREQUIS — Secrets GitHub :
+#   RENDER_GATEWAY_DEPLOY_HOOK → URL du deploy hook Render du Gateway
+#   (Render dashboard → Gateway service → Settings → Deploy Hook)
 # ================================================================
 
 name: CD — Gateway
@@ -11,7 +27,13 @@ on:
     paths:
       - "gateway/**"
 
+# Un seul déploiement à la fois — le Gateway est le point d'entrée unique.
+concurrency:
+  group: cd-gateway-production
+  cancel-in-progress: false
+
 jobs:
+
   deploy:
     name: Deploy Gateway → Render
     runs-on: ubuntu-latest
@@ -20,9 +42,69 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Attend que le CI (validate + build) soit passé sur ce SHA.
+      # Évite de déployer une config Nginx cassée.
+      - name: Wait for CI to complete
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          check-name: "Build Docker Image"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 15
+          allowed-conclusions: success
+
+      # Déclenche le redéploiement Render.
+      # Render rebuild l image depuis le Dockerfile et redémarre le container.
       - name: Trigger Render Deploy Hook
         run: |
-          curl -s -o /dev/null -w "%{http_code}" \
-            -X POST "${{ secrets.RENDER_GATEWAY_DEPLOY_HOOK }}"
-        # Secrets à créer dans GitHub :
-        # RENDER_GATEWAY_DEPLOY_HOOK = URL du deploy hook Render du service Gateway
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${{ secrets.RENDER_GATEWAY_DEPLOY_HOOK }}")
+
+          echo "Render responded with HTTP $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
+            echo "Deploy hook failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
+
+          echo "Deploy triggered successfully"
+
+      # Attend que le Gateway réponde sur /health.
+      # Le cold start Render prend ~2-3 min.
+      - name: Wait for Gateway health check
+        run: |
+          SERVICE_URL="https://ecom-watch-gateway.onrender.com"
+          MAX_ATTEMPTS=20
+          WAIT_SECONDS=15
+
+          echo "Polling $SERVICE_URL/health (max ${MAX_ATTEMPTS} attempts)"
+
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            HTTP_STATUS=$(curl \
+              --silent \
+              --output /dev/null \
+              --write-out "%{http_code}" \
+              --max-time 10 \
+              "$SERVICE_URL/health" || echo "000")
+
+            if [ "$HTTP_STATUS" = "200" ]; then
+              echo "Gateway is live after $i attempt(s) — HTTP $HTTP_STATUS"
+              exit 0
+            fi
+
+            echo "Attempt $i/$MAX_ATTEMPTS — HTTP ${HTTP_STATUS} — next in ${WAIT_SECONDS}s"
+            sleep $WAIT_SECONDS
+          done
+
+          echo "Timeout: Gateway did not respond after $((MAX_ATTEMPTS * WAIT_SECONDS))s"
+          exit 1
+
+      - name: Deployment summary
+        if: success()
+        run: |
+          echo "### Gateway déployé ✅" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit** : \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch** : \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Auteur** : ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Health** : https://ecom-watch-gateway.onrender.com/health" >> $GITHUB_STEP_SUMMARY

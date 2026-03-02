@@ -10,16 +10,21 @@
  * - Notifications fire-and-forget (ne bloquent pas le flux principal)
  * - Auto-claim des commandes guest après inscription/connexion
  *   pour une meilleure expérience utilisateur (pas de panier perdu)
+ *
+ * MICROSERVICE :
+ * - notificationService (import direct local) remplacé par notificationClient (HTTP)
+ *   Les emails welcome sont délégués au notification-service centralisé.
+ *   Résilience gérée côté notification-service (BullMQ 3 retries).
  */
 import { usersRepo, rolesRepo } from '../repositories/index.js';
 import { passwordService } from './password.service.js';
 import { tokenService } from './token.service.js';
 import { sessionService } from './session.service.js';
 import { orderClient } from '../clients/order.client.js';
+import { notificationClient } from '../clients/notification.client.js';
 import { AppError, ConflictError } from '../utils/appError.js';
 import { HTTP_STATUS } from '../constants/httpStatus.js';
 import { pgPool } from '../config/database.js';
-import { notificationService } from './notifications/notification.service.js';
 import { logInfo, logError } from '../utils/logger.js';
 
 class AuthService {
@@ -63,7 +68,7 @@ class AuthService {
      * Workflow :
      * 1. Vérification unicité email
      * 2. Création utilisateur + attribution rôle (transaction atomique)
-     * 3. Notification d'inscription (fire-and-forget)
+     * 3. Notification d'inscription (fire-and-forget → notification-service)
      * 4. Auto-claim des commandes guest avec le même email
      * 5. Création de la session authentifiée
      */
@@ -97,9 +102,9 @@ class AuthService {
 
             await client.query('COMMIT');
 
-            this.#sendRegistrationNotification(newUser);
+            // Fire-and-forget — notificationClient ne lève jamais d'exception
+            notificationClient.notifyWelcome(newUser.email, newUser);
 
-            // Appel HTTP vers order-service — contrat identique à l'ancien import direct
             const claimResult = await orderClient.claimGuestOrders(
                 newUser.id,
                 email.trim().toLowerCase()
@@ -147,7 +152,6 @@ class AuthService {
         const roles = await rolesRepo.listUserRoles(user.id);
         const userWithRoles = { ...user, roles: roles.map((r) => r.name) };
 
-        // Appel HTTP vers order-service — contrat identique à l'ancien import direct
         const claimResult = await orderClient.claimGuestOrders(
             user.id,
             email.trim().toLowerCase()
@@ -209,23 +213,6 @@ class AuthService {
                 roles: userRoles,
             },
         };
-    }
-
-    /**
-     * Notification d'inscription en fire-and-forget.
-     * L'inscription ne doit jamais échouer à cause d'un problème SMTP.
-     */
-    #sendRegistrationNotification(user) {
-        try {
-            const result = notificationService.notifyUserRegistered(user);
-            if (result && typeof result.catch === 'function') {
-                result.catch((error) =>
-                    logError(error, { context: 'notification inscription', userId: user.id })
-                );
-            }
-        } catch (error) {
-            logError(error, { context: 'notification inscription', userId: user.id });
-        }
     }
 }
 

@@ -11,15 +11,16 @@
  *
  * PÉRIMÈTRE DE CE SERVICE :
  * - Tables : orders, order_items, shipments (schéma "order")
- * - Appels HTTP : inventoryClient (stock), productClient (prix, poids)
+ * - Appels HTTP : inventoryClient (stock), productClient (prix, poids), notificationClient (emails)
  * - Calculs purs : shippingService, taxService (aucune DB)
  */
 import { ordersRepo, shipmentsRepo } from '../repositories/index.js';
+import { usersRepo } from '../repositories/users.repo.js';
 import { inventoryClient } from '../clients/inventory.client.js';
 import { productClient } from '../clients/product.client.js';
+import { notificationClient } from '../clients/notification.client.js';
 import { shippingService } from './shipping.service.js';
 import { taxService } from './tax.service.js';
-import { notificationService } from './notifications/notification.service.js';
 import { cacheService } from './cache.service.js';
 import { AppError, ValidationError, BusinessError } from '../utils/appError.js';
 import { HTTP_STATUS } from '../constants/httpStatus.js';
@@ -149,6 +150,33 @@ class OrderService {
                 });
             }
         }
+    }
+
+    /**
+     * Résout l'email du destinataire pour les notifications.
+     * Priorité à l'adresse de livraison (valable Guest et User),
+     * fallback sur le compte utilisateur si disponible.
+     *
+     * @private
+     * @param {string|null} userId    - ID de l'utilisateur connecté (null si guest)
+     * @param {object}      orderData - Données de la commande
+     * @returns {Promise<string|null>}
+     */
+    async #resolveCustomerEmail(userId, orderData) {
+        if (orderData?.shippingAddress?.email) {
+            return orderData.shippingAddress.email;
+        }
+
+        if (userId) {
+            try {
+                const user = await usersRepo.findById(userId);
+                if (user?.email) return user.email;
+            } catch (error) {
+                logError(error, { context: 'OrderService.resolveCustomerEmail', userId });
+            }
+        }
+
+        return null;
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -562,6 +590,7 @@ class OrderService {
             }
         }
 
+        // Fire-and-forget — ne bloque pas la réponse HTTP
         this.#sendOrderStatusNotification(
             previousStatus, newStatus, updatedOrder.userId, updatedOrder, { shipment: shipmentData }
         );
@@ -573,16 +602,63 @@ class OrderService {
         return await ordersRepo.findAll(params);
     }
 
-    #sendOrderStatusNotification(previousStatus, newStatus, userId, order, metadata) {
-        try {
-            notificationService
-                .notifyOrderStatusChange(previousStatus, newStatus, userId, order, metadata)
-                .catch((error) =>
-                    logError(error, { context: 'OrderService.sendOrderStatusNotification', orderId: order.id })
-                );
-        } catch (error) {
-            logError(error, { context: 'OrderService.sendOrderStatusNotification', orderId: order.id });
-        }
+    // ─────────────────────────────────────────────────────────────────────
+    // NOTIFICATION — Délégation vers le notification-service
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Déclenche la notification appropriée selon le nouveau statut de commande.
+     * Fire-and-forget : ne propage jamais d'erreur pour ne pas bloquer le flux métier.
+     *
+     * Aucune notification si :
+     *   - Le statut n'a pas changé (idempotence)
+     *   - Le statut est PAID (géré par le payment-service après confirmation Stripe)
+     *   - L'email du destinataire est introuvable
+     *
+     * @param {string} previousStatus - Statut avant la mise à jour
+     * @param {string} newStatus      - Nouveau statut
+     * @param {string|null} userId    - ID de l'utilisateur (null si guest)
+     * @param {object} order          - Données de la commande mise à jour
+     * @param {object} metadata       - Données supplémentaires (shipment, cancellationReason)
+     */
+    #sendOrderStatusNotification(previousStatus, newStatus, userId, order, metadata = {}) {
+        // Pas de notification si le statut est inchangé
+        if (previousStatus === newStatus) return;
+
+        // La confirmation de paiement est envoyée par le payment-service
+        // via notificationClient.notifyOrderConfirmation — on ne la duplique pas ici.
+        if (newStatus === ORDER_STATUS.PAID) return;
+
+        // Résolution de l'email et dispatch de manière totalement asynchrone.
+        // L'absence d'await est intentionnelle : cette opération est fire-and-forget.
+        this.#resolveCustomerEmail(userId, order)
+            .then((email) => {
+                if (!email) {
+                    logError(
+                        new Error('Email introuvable pour la notification de commande'),
+                        { context: 'OrderService.sendOrderStatusNotification', orderId: order.id, newStatus }
+                    );
+                    return;
+                }
+
+                switch (newStatus) {
+                    case ORDER_STATUS.SHIPPED:
+                        notificationClient.notifyOrderShipped(email, order, metadata.shipment ?? {});
+                        break;
+                    case ORDER_STATUS.DELIVERED:
+                        notificationClient.notifyOrderDelivered(email, order);
+                        break;
+                    case ORDER_STATUS.CANCELLED:
+                        notificationClient.notifyOrderCancelled(email, order, metadata.cancellationReason ?? null);
+                        break;
+                    default:
+                        // Les statuts non gérés (ex: PROCESSING) ne déclenchent pas de notification.
+                        logInfo(`[Notification] Statut "${newStatus}" non notifié — orderId: ${order.id}`);
+                }
+            })
+            .catch((error) =>
+                logError(error, { context: 'OrderService.sendOrderStatusNotification', orderId: order.id })
+            );
     }
 }
 

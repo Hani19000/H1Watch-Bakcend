@@ -19,6 +19,9 @@ const requiredEnv = [
     'CLIENT_URL',
     'ORDER_SERVICE_URL',
     'INTERNAL_AUTH_SECRET',
+    // Notification-service — emails transactionnels déportés (welcome, password reset)
+    'NOTIFICATION_SERVICE_URL',
+    'INTERNAL_NOTIFICATION_SECRET',
 ];
 
 // SENTRY_DSN optionnel en dev, obligatoire en prod
@@ -69,9 +72,6 @@ export const ENV = Object.freeze({
             database: process.env.POSTGRES_DB,
         },
         redis: {
-            // host: process.env.REDIS_HOST || 'localhost',
-            // port: Number(process.env.REDIS_PORT) || 6379,
-            // password: process.env.REDIS_PASSWORD || undefined,
             url: process.env.REDIS_URL,
         },
     },
@@ -102,8 +102,11 @@ export const ENV = Object.freeze({
 
     // Communication inter-services
     services: {
-        orderServiceUrl: process.env.ORDER_SERVICE_URL, // utilisé par order.client.js
-        internalSecret: process.env.INTERNAL_AUTH_SECRET,  // header X-Internal-Secret
+        orderServiceUrl: process.env.ORDER_SERVICE_URL,
+        internalSecret: process.env.INTERNAL_AUTH_SECRET,         // X-Internal-Secret exposé par ce service
+        notificationServiceUrl: process.env.NOTIFICATION_SERVICE_URL,
+        notificationSecret: process.env.INTERNAL_NOTIFICATION_SECRET, // X-Internal-Secret vers notification-service
+        httpTimeoutMs: Number(process.env.INTERNAL_HTTP_TIMEOUT_MS) || 5000,
     },
 
     cors: {
@@ -111,11 +114,4 @@ export const ENV = Object.freeze({
     },
 
     clientUrl: process.env.CLIENT_URL || 'http://localhost:5173',
-
-    // Utilisé par email.service.js — ton projet utilise Resend
-    email: {
-        apiKey: process.env.RESEND_API_KEY,
-        fromEmail: process.env.RESEND_FROM_EMAIL || 'noreply@ecom-watch.local',
-        fromName: process.env.RESEND_FROM_NAME || 'ECOM-WATCH',
-    },
 });

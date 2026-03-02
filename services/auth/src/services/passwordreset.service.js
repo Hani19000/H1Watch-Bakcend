@@ -9,15 +9,21 @@
  * - Réponse identique si l'email existe ou non (anti-énumération)
  * - Invalidation de toutes les sessions actives après reset
  * - Vérification historique pour interdire la réutilisation des anciens mots de passe
+ *
+ * MICROSERVICE :
+ * - notificationService (import direct local) remplacé par notificationClient (HTTP)
+ *   Le resetUrl est construit ici car le notification-service ne connaît pas
+ *   CLIENT_URL de l'auth-service.
  */
 import crypto from 'crypto';
 import { usersRepo } from '../repositories/index.js';
 import { passwordResetRepo } from '../repositories/passwordreset.repo.js';
 import { passwordService } from './password.service.js';
 import { sessionService } from './session.service.js';
-import { notificationService } from './notifications/notification.service.js';
+import { notificationClient } from '../clients/notification.client.js';
 import { AppError, BusinessError } from '../utils/appError.js';
 import { HTTP_STATUS } from '../constants/httpStatus.js';
+import { ENV } from '../config/environment.js';
 import { logInfo, logError } from '../utils/logger.js';
 
 class PasswordResetService {
@@ -59,7 +65,10 @@ class PasswordResetService {
 
         await passwordResetRepo.createToken(user.id, tokenHash);
 
-        this.#sendResetNotification(user.email, rawToken);
+        // Fire-and-forget — notificationClient ne lève jamais d'exception
+        // Le resetUrl est construit ici car notification-service ne connaît pas CLIENT_URL
+        const resetUrl = `${ENV.clientUrl}/reset-password?token=${rawToken}`;
+        notificationClient.notifyPasswordReset(user.email, resetUrl);
 
         logInfo(`Demande de reset mot de passe pour userId=${user.id}`);
     }
@@ -147,25 +156,6 @@ class PasswordResetService {
             await sessionService.deleteAllUserSessions(userId);
         } catch (error) {
             logError(error, { context: 'PasswordResetService.invalidateAllSessions', userId });
-        }
-    }
-
-    /**
-     * Envoi de la notification de reset en fire-and-forget.
-     * L'opération principale ne doit jamais échouer à cause d'un problème SMTP.
-     *
-     * @private
-     */
-    #sendResetNotification(email, rawToken) {
-        try {
-            const result = notificationService.notifyPasswordReset(email, rawToken);
-            if (result && typeof result.catch === 'function') {
-                result.catch((error) =>
-                    logError(error, { context: 'PasswordResetService.sendResetNotification', email })
-                );
-            }
-        } catch (error) {
-            logError(error, { context: 'PasswordResetService.sendResetNotification', email });
         }
     }
 }

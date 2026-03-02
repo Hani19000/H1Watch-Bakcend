@@ -1,25 +1,27 @@
 /**
  * @module Clients/Product
  *
- * Client HTTP vers les endpoints internes du monolith pour les données produit.
- * Remplace les appels directs à `productsRepo` qui référençaient le schéma `product`.
+ * Client HTTP de l'order-service vers le product-service.
+ * Remplace les appels directs à `productsRepo` dans orders.service.js.
  *
- * Données retournées par le monolith :
- * - `getVariant`        → { id, price, weight, slug, productId }
+ * Données retournées par le product-service :
+ * - `getVariant`        → { id, price, weight, sku, productId, attributes }
  * - `getPromotionPrice` → { basePrice, effectivePrice, hasPromotion }
  */
 import { ENV } from '../config/environment.js';
 import { logError } from '../utils/logger.js';
 
-// Même raison que inventory.client.js : le monolith monte tout sous /api/v1.
-const BASE_URL = `${ENV.services.monolithUrl}/api/v1/internal/products`;
+// product-service expose ses variants sous /internal/variants
+// (chemin distinct de l'ancien /internal/products pour plus de clarté)
+const BASE_URL = `${ENV.services.productServiceUrl}/internal/variants`;
 const TIMEOUT_MS = ENV.services.httpTimeoutMs;
 
 // ── Utilitaires ───────────────────────────────────────────────────────────────
 
 const buildHeaders = () => ({
     'Content-Type': 'application/json',
-    'X-Internal-Secret': ENV.internal.orderSecret,
+    // Secret partagé avec le product-service (INTERNAL_PRODUCT_SECRET)
+    'X-Internal-Secret': ENV.internal.productSecret,
 });
 
 const fetchWithTimeout = async (url, options) => {

@@ -23,6 +23,8 @@ import { ENV } from './environment.js';
 export const redisConnection = new IORedis(ENV.redis.url, {
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
+    // Préfixe appliqué à toutes les clés pour isoler BullMQ des autres usages Redis
+    keyPrefix: 'notification:',
 });
 
 redisConnection.on('connect', () => {

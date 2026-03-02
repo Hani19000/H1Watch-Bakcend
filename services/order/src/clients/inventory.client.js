@@ -10,9 +10,9 @@
 import { ENV } from '../config/environment.js';
 import { logError } from '../utils/logger.js';
 
-// Le monolith monte ses routes sous /api/v1 (app.use('/api/v1', v1Router)).
-// Les routes /internal font partie de ce router — le préfixe /api/v1 est obligatoire.
-const BASE_URL = `${ENV.services.monolithUrl}/api/v1/internal/inventory`;
+// product-service expose ses routes internes à la racine /internal
+// (pas sous /api/v1 — les routes internes ne passent pas par le Gateway)
+const BASE_URL = `${ENV.services.productServiceUrl}/internal/inventory`;
 const TIMEOUT_MS = ENV.services.httpTimeoutMs;
 
 // ── Utilitaires ───────────────────────────────────────────────────────────────
@@ -23,7 +23,8 @@ const TIMEOUT_MS = ENV.services.httpTimeoutMs;
  */
 const buildHeaders = () => ({
     'Content-Type': 'application/json',
-    'X-Internal-Secret': ENV.internal.orderSecret,
+    // Secret partagé avec le product-service (INTERNAL_PRODUCT_SECRET)
+    'X-Internal-Secret': ENV.internal.productSecret,
 });
 
 /**

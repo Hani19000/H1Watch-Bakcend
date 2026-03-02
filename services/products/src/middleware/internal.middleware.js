@@ -9,6 +9,7 @@
  * La comparaison timing-safe prévient les attaques par analyse temporelle.
  */
 import crypto from 'crypto';
+import { ENV } from '../config/environment.js';
 import { HTTP_STATUS } from '../constants/httpStatus.js';
 import { logError } from '../utils/logger.js';
 
@@ -38,7 +39,8 @@ const timingSafeEqual = (provided, expected) => {
 
 /**
  * Valide les appels entrants depuis n'importe quel service interne.
- * Utilise `INTERNAL_PRODUCT_SECRET`.
+ * Utilise ENV.internalSecret (INTERNAL_PRODUCT_SECRET) — centralisé dans
+ * environment.js pour rester cohérent avec tous les autres services.
  */
 export const fromInternalService = (req, res, next) => {
     const provided = req.headers[HEADER_NAME];
@@ -50,7 +52,7 @@ export const fromInternalService = (req, res, next) => {
         });
     }
 
-    const expected = process.env.INTERNAL_PRODUCT_SECRET;
+    const expected = ENV.internalSecret;
 
     if (!expected || !timingSafeEqual(provided, expected)) {
         logError(new Error('Tentative accès interne avec secret invalide'), {

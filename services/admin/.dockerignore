@@ -1,0 +1,29 @@
+# Dépendances — installées dans le stage "deps" du Dockerfile
+node_modules
+
+# Logs
+*.log
+npm-debug.log*
+
+# Variables d'environnement — jamais dans l'image Docker
+.env
+.env.*
+
+# Fichiers de développement
+.git
+.gitignore
+.github
+
+# Fichiers Docker (évite la récursion)
+Dockerfile
+.dockerignore
+
+# IDE et outils locaux
+.vscode
+.idea
+*.swp
+*.swo
+
+# Tests et couverture (non nécessaires en production)
+coverage
+.nyc_output

@@ -62,7 +62,6 @@ jobs:
           docker run --rm \
             -v ${{ github.workspace }}/gateway/nginx:/etc/nginx/src:ro \
             -e PORT=8080 \
-            -e MONOLITH_URL=ecom-watch.onrender.com \
             -e AUTH_SERVICE_HOST=ecom-watch-auth.onrender.com \
             -e ORDER_SERVICE_HOST=ecom-watch-order.onrender.com \
             -e PRODUCT_SERVICE_HOST=ecom-watch-product.onrender.com \
@@ -74,13 +73,6 @@ jobs:
               set -e
 
               mkdir -p /tmp/nginx/conf.d
-
-              # Simulation exacte de entrypoint.sh
-              envsubst "${PORT} ${MONOLITH_URL} ${AUTH_SERVICE_HOST} ${ORDER_SERVICE_HOST} ${PRODUCT_SERVICE_HOST} ${PAYMENT_SERVICE_HOST} ${CART_SERVICE_HOST} ${NOTIFICATION_SERVICE_HOST} ${FRONTEND_DOMAIN}" \
-                < /etc/nginx/src/nginx.conf > /tmp/nginx/nginx.conf
-
-              envsubst "${PORT} ${MONOLITH_URL} ${AUTH_SERVICE_HOST} ${ORDER_SERVICE_HOST} ${PRODUCT_SERVICE_HOST} ${PAYMENT_SERVICE_HOST} ${CART_SERVICE_HOST} ${NOTIFICATION_SERVICE_HOST} ${FRONTEND_DOMAIN}" \
-                < /etc/nginx/src/conf.d/default.conf > /tmp/nginx/conf.d/default.conf
 
               cp /etc/nginx/src/conf.d/proxy_params.conf /tmp/nginx/conf.d/proxy_params.conf
 

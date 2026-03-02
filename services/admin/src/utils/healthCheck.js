@@ -1,45 +1,25 @@
 /**
  * @module Utils/HealthCheck
  *
- * Vérifie la disponibilité des services aval critiques pour l'admin-service.
+ * Vérifie l'état des dépendances critiques de l'admin-service.
+ * Exposé via GET /health pour les sondes Render.
  *
- * L'admin-service n'ayant pas de base de données propre, le health check
- * teste la joignabilité des services dont il dépend via leurs endpoints /health.
- * Un service indisponible est signalé en "degraded" mais ne bloque pas le démarrage.
+ * Redis est non-bloquant : son indisponibilité est signalée sans faire échouer
+ * le health check global (l'admin-service continue de fonctionner sans cache).
  */
-import { ENV } from '../config/environment.js';
-import { logError } from './logger.js';
+import { cacheService } from '../services/cache.service.js';
 
-/**
- * Sonde le /health d'un service distant avec un timeout court.
- * Retourne un statut dégradé sans lancer d'exception en cas d'erreur réseau.
- */
-const checkService = async (name, url) => {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3000);
-
-    try {
-        const response = await fetch(`${url}/health`, { signal: controller.signal });
-        return response.ok
-            ? { status: 'up' }
-            : { status: 'degraded', code: response.status };
-    } catch (error) {
-        logError(error, { context: `healthCheck — ${name}` });
-        return { status: 'down', error: error.message };
-    } finally {
-        clearTimeout(timeoutId);
-    }
+const checkRedis = () => {
+    // isReady() reflète l'état de connexion sans déclencher de requête réseau.
+    return cacheService.isReady()
+        ? { status: 'up' }
+        : { status: 'degraded', message: 'Redis non connecté — cache désactivé' };
 };
 
 /**
- * Agrège l'état des services en parallèle pour minimiser le temps de réponse.
+ * Agrège l'état des dépendances.
+ * L'admin-service est stateless (pas de DB directe) — seul Redis est vérifié.
  */
-export const healthCheck = async () => {
-    const [auth, order, product] = await Promise.all([
-        checkService('auth-service',    ENV.services.authServiceUrl),
-        checkService('order-service',   ENV.services.orderServiceUrl),
-        checkService('product-service', ENV.services.productServiceUrl),
-    ]);
-
-    return { auth, order, product };
+export const healthCheck = () => {
+    return { redis: checkRedis() };
 };

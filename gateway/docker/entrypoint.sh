@@ -3,7 +3,6 @@ set -e
 
 echo "ECOM-WATCH Gateway démarrage..."
 echo "PORT                  = ${PORT}"
-echo "MONOLITH              = ${MONOLITH_URL}"
 echo "AUTH_SERVICE          = ${AUTH_SERVICE_HOST}"
 echo "ORDER_SERVICE         = ${ORDER_SERVICE_HOST}"
 echo "PRODUCT_SERVICE       = ${PRODUCT_SERVICE_HOST}"

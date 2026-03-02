@@ -1,111 +1,48 @@
 /**
- * @module Routes/Internal/Admin/Inventory — product-service
+ * @module Routes/Inventory
  *
- * Endpoints d'inventaire réservés à l'admin-service.
- * Protégés par INTERNAL_ADMIN_SECRET via fromAdminService — jamais exposés par le Gateway.
+ * Routes publiques d'inventaire exposées par le Gateway sur /api/v1/inventory/*.
  *
- * Pourquoi ce fichier plutôt que de laisser le frontend appeler /inventory directement ?
- * Les routes publiques /inventory exigent un JWT Bearer valide (protect + restrictTo('ADMIN')).
- * Faire valider le JWT par le product-service crée un couplage sur JWT_ACCESS_SECRET et
- * oblige à synchroniser ce secret entre deux services distincts.
- * En passant par l'admin-service (qui valide lui-même le JWT), le product-service
- * n'a besoin que de son secret interne — séparation de responsabilité respectée.
+ * Deux niveaux d'accès :
+ *   - Lecture du stock d'une variante → public (utilisé par le frontend
+ *     pour afficher "En stock / Rupture" sur la fiche produit)
+ *   - Liste, alertes, ajustements → ADMIN uniquement
+ *
+ * La gestion d'inventaire depuis le dashboard admin transite par l'admin-service
+ * via les routes /internal/admin/inventory (INTERNAL_ADMIN_SECRET).
+ * Ces routes existent en parallèle pour un accès direct avec JWT Bearer.
+ *
+ * ORDRE DES ROUTES :
+ *   /alerts déclaré avant /:variantId pour qu'Express ne l'interprète pas
+ *   comme une valeur de paramètre.
  */
 import { Router } from 'express';
-import { fromAdminService } from '../middleware/internal.middleware.js';
-import { inventoryService } from '../services/inventory.service.js';
-import { asyncHandler } from '../utils/asyncHandler.js';
-import { HTTP_STATUS } from '../constants/httpStatus.js';
-import { ValidationError } from '../utils/appError.js';
+import { inventoryController } from '../controllers/inventory.controller.js';
+import { protect } from '../middleware/auth.middleware.js';
+import { restrictTo } from '../middleware/role.middleware.js';
 
 const router = Router();
 
-/**
- * GET /internal/admin/inventory
- * Liste complète de l'inventaire avec filtres et pagination.
- * Délègue à inventoryService.getAllInventory — aucune logique métier dupliquée.
- */
-router.get(
-    '/inventory',
-    fromAdminService,
-    asyncHandler(async (req, res) => {
-        const result = await inventoryService.getAllInventory(req.query);
+// ── ADMINISTRATION ────────────────────────────────────────────────────────────
+// Déclarées avant la route paramétrée /:variantId pour éviter les conflits.
 
-        res.status(HTTP_STATUS.OK).json({
-            status: 'success',
-            data: result,
-        });
-    })
-);
+// Liste complète de l'inventaire avec filtres et pagination
+router.get('/', protect, restrictTo('ADMIN'), inventoryController.getAllInventory);
 
-/**
- * GET /internal/admin/inventory/alerts
- * Articles en stock bas — seuil défini dans inventoryService.
- * Exposé ici pour éviter d'exiger le JWT du frontend dans le product-service.
- */
-router.get(
-    '/inventory/alerts',
-    fromAdminService,
-    asyncHandler(async (req, res) => {
-        const alerts = await inventoryService.getLowStockAlerts();
+// Articles dont le stock est sous le seuil d'alerte
+router.get('/alerts', protect, restrictTo('ADMIN'), inventoryController.getLowStockAlerts);
 
-        res.status(HTTP_STATUS.OK).json({
-            status: 'success',
-            results: alerts.length,
-            data: { alerts },
-        });
-    })
-);
+// ── LECTURE PUBLIQUE ──────────────────────────────────────────────────────────
 
-/**
- * PATCH /internal/admin/inventory/:variantId/adjust
- * Ajustement manuel du stock (réception, perte, correction d'inventaire).
- * La logique d'ajustement reste dans inventoryService — ce handler ne fait que déléguer.
- */
-router.patch(
-    '/inventory/:variantId/adjust',
-    fromAdminService,
-    asyncHandler(async (req, res) => {
-        const { variantId } = req.params;
-        const { quantity, reason } = req.body;
+// Stock disponible d'une variante — utilisé par le frontend pour les badges stock
+router.get('/:variantId', inventoryController.getStock);
 
-        if (quantity === undefined || quantity === null) {
-            throw new ValidationError('Le champ quantity est requis');
-        }
+// ── MUTATIONS (admin uniquement) ──────────────────────────────────────────────
 
-        const updatedStock = await inventoryService.adjustStock(variantId, quantity, reason);
+// Ajustement manuel : réception de marchandise, perte, correction d'inventaire
+router.patch('/:variantId/adjust', protect, restrictTo('ADMIN'), inventoryController.adjustStock);
 
-        res.status(HTTP_STATUS.OK).json({
-            status: 'success',
-            message: 'Stock mis à jour avec succès',
-            data: { stock: updatedStock },
-        });
-    })
-);
-
-/**
- * PATCH /internal/admin/inventory/restock/:variantId
- * Réapprovisionnement suite à une réception de marchandise.
- */
-router.patch(
-    '/inventory/restock/:variantId',
-    fromAdminService,
-    asyncHandler(async (req, res) => {
-        const { variantId } = req.params;
-        const { quantity } = req.body;
-
-        if (!quantity) {
-            throw new ValidationError('Le champ quantity est requis');
-        }
-
-        const stock = await inventoryService.restockVariant(variantId, parseInt(quantity, 10));
-
-        res.status(HTTP_STATUS.OK).json({
-            status: 'success',
-            message: 'Stock réapprovisionné avec succès',
-            data: { stock },
-        });
-    })
-);
+// Réapprovisionnement suite à une réception
+router.patch('/restock/:variantId', protect, restrictTo('ADMIN'), inventoryController.addStock);
 
 export default router;

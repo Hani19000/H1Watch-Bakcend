@@ -4,11 +4,15 @@
  * Client HTTP vers l'auth-service pour les opérations d'administration.
  * Toutes les opérations sur les utilisateurs restent dans l'auth-service
  * qui est propriétaire du schéma "auth" — l'admin-service délègue, ne duplique pas.
+ *
+ * L'auth-service monte ses routes sous /api/v1 (app.use('/api/v1', router)).
+ * Les routes internes sont donc accessibles à /api/v1/internal/admin/*.
  */
 import { ENV } from '../config/environment.js';
 import { logError } from '../utils/logger.js';
 
-const BASE_URL = `${ENV.services.authServiceUrl}/internal/admin`;
+// /api/v1 est requis : l'auth-service monte toutes ses routes sous ce préfixe.
+const BASE_URL = `${ENV.services.authServiceUrl}/api/v1/internal/admin`;
 const TIMEOUT_MS = ENV.services.httpTimeoutMs;
 
 const buildHeaders = () => ({
@@ -61,6 +65,7 @@ export const authClient = {
 
     /**
      * Retourne le nombre total d'utilisateurs enregistrés.
+     * Utilisé par getDashboardStats pour le widget "Utilisateurs".
      */
     async countUsers() {
         try {
@@ -77,8 +82,8 @@ export const authClient = {
 
     /**
      * Met à jour le rôle et/ou le statut actif d'un utilisateur.
-     * La logique de garde (pas d'auto-modification, pas de modification d'admin)
-     * est appliquée dans l'auth-service — l'admin-service transmet l'adminId.
+     * Les gardes métier (anti-auto-modification, anti-modification d'admin)
+     * sont centralisées dans l'auth-service — l'admin-service transmet l'adminId.
      *
      * @param {string} targetUserId
      * @param {{ role?, isActive? }} payload
@@ -103,8 +108,8 @@ export const authClient = {
 
     /**
      * Supprime un compte utilisateur.
-     * La logique de garde (pas d'auto-suppression, pas de suppression d'admin)
-     * est appliquée dans l'auth-service.
+     * Les gardes métier (anti-auto-suppression, anti-suppression d'admin)
+     * sont appliquées dans l'auth-service.
      *
      * @param {string} targetUserId
      * @param {string} adminId - ID de l'admin qui effectue la suppression
@@ -128,7 +133,7 @@ export const authClient = {
 
     /**
      * Déclenche le nettoyage des refresh tokens expirés.
-     * Appelé par le cron sessions-cleanup dans l'admin-service.
+     * Appelé par le cron sessions-cleanup (0 3 * * *) dans l'admin-service.
      */
     async triggerSessionsCleanup() {
         try {

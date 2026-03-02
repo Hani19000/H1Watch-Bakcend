@@ -9,9 +9,9 @@
  * BullMQ nécessite IORedis pour ses opérations Lua atomiques (EVAL).
  * Le client natif `redis` de npm n'est pas compatible avec BullMQ.
  *
- * Note : L'isolation des clés (le préfixe) est gérée directement
- * lors de l'instanciation de la Queue et du Worker BullMQ, et non
- * sur la connexion IORedis elle-même (qui ne le supporte pas).
+ * Le préfixe `notification:` isole les clés BullMQ de celles des autres
+ * services dans l'instance Redis partagée Upstash, exactement comme
+ * les schémas Neon isolent les tables PostgreSQL.
  */
 import IORedis from 'ioredis';
 import { ENV } from './environment.js';
@@ -21,6 +21,8 @@ import { ENV } from './environment.js';
 export const redisConnection = new IORedis(ENV.redis.url, {
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
+    // Préfixe appliqué à toutes les clés pour isoler BullMQ des autres usages Redis
+    keyPrefix: 'notification:',
 });
 
 redisConnection.on('connect', () => {

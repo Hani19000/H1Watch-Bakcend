@@ -460,4 +460,30 @@ export const ordersRepo = {
     );
     return rows;
   },
+
+  /**
+   * Rapport de ventes agrégé par jour sur une période donnée.
+   * Inclut le nombre de commandes, le chiffre d'affaires et le panier moyen.
+   * Exclut les commandes CANCELLED et PENDING — seules les ventes effectives.
+   *
+   * @param {string} startDate - Date ISO de début (ex: '2024-01-01')
+   * @param {string} endDate   - Date ISO de fin   (ex: '2024-01-31')
+   */
+  async getSalesReport(startDate, endDate) {
+    const { rows } = await pgPool.query(
+      `SELECT
+               DATE(created_at)               AS date,
+               COUNT(*)::int                  AS order_count,
+               COALESCE(SUM(total_amount), 0) AS revenue,
+               COALESCE(AVG(total_amount), 0) AS avg_order_value
+             FROM orders
+             WHERE status NOT IN ('CANCELLED', 'PENDING')
+               AND created_at >= $1
+               AND created_at < ($2::date + INTERVAL '1 day')
+             GROUP BY DATE(created_at)
+             ORDER BY date ASC`,
+      [startDate, endDate]
+    );
+    return rows;
+  },
 };

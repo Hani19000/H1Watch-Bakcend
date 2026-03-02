@@ -58,13 +58,17 @@ export const productClient = {
      * Récupère les données d'une variante produit (prix de base, poids, slug).
      * Utilisé dans `previewOrderTotal` pour obtenir le poids sans réserver le stock.
      *
+     * Route product-service : GET /internal/variants/:variantId
+     * BASE_URL = ${productServiceUrl}/internal/variants
+     * → appel final : ${BASE_URL}/${variantId}  ✅
+     *
      * @param {string} variantId - UUID de la variante
-     * @throws {Error} Si la variante est introuvable (404) ou le monolith inaccessible
+     * @throws {Error} Si la variante est introuvable (404) ou le service inaccessible
      */
     async getVariant(variantId) {
         try {
             const response = await fetchWithTimeout(
-                `${BASE_URL}/variant/${variantId}`,
+                `${BASE_URL}/${variantId}`,
                 { method: 'GET', headers: buildHeaders() }
             );
 
@@ -79,14 +83,18 @@ export const productClient = {
      * Récupère le prix effectif d'une variante en tenant compte des promotions actives.
      * Retourne le prix de base si aucune promotion n'est active.
      *
+     * Route product-service : GET /internal/variants/:variantId/promo
+     * BASE_URL = ${productServiceUrl}/internal/variants
+     * → appel final : ${BASE_URL}/${variantId}/promo  ✅
+     *
      * @param {string} variantId - UUID de la variante
      * @returns {{ basePrice: number, effectivePrice: number, hasPromotion: boolean }}
-     * @throws {Error} Si le monolith est inaccessible
+     * @throws {Error} Si le service est inaccessible
      */
     async getPromotionPrice(variantId) {
         try {
             const response = await fetchWithTimeout(
-                `${BASE_URL}/variant/${variantId}/promo`,
+                `${BASE_URL}/${variantId}/promo`,
                 { method: 'GET', headers: buildHeaders() }
             );
 

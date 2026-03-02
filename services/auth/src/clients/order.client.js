@@ -20,7 +20,11 @@ import { logInfo, logError } from '../utils/logger.js';
 // ─── Constantes ──────────────────────────────────────────────────────────────
 
 const ORDER_SERVICE_URL = ENV.services.orderServiceUrl;
-const INTERNAL_AUTH_SECRET = ENV.services.internalSecret;
+// CORRECTIF : le secret d'authentification inter-services est dans ENV.internal.authSecret
+// (process.env.INTERNAL_AUTH_SECRET), pas dans ENV.services qui n'expose pas de secret.
+// ENV.services.internalSecret était `undefined` → order-service rejetait tous les appels
+// avec "Tentative accès interne avec secret invalide" (401).
+const INTERNAL_AUTH_SECRET = ENV.internal.authSecret;
 const REQUEST_TIMEOUT_MS = 5_000;
 
 // ─── Helpers privés ───────────────────────────────────────────────────────────

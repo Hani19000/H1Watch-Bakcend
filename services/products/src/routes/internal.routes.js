@@ -1,46 +1,47 @@
 /**
- * @module Routes/Internal
+ * @module Routes/Internal — product-service
  *
- * Endpoints du product-service exclusivement appelés par les services pairs.
+ * Endpoints exclusivement appelés par les services pairs.
  * Non exposés via le Gateway Nginx.
  *
- * Protégés par `X-Internal-Secret` → `fromInternalService`.
+ * Deux périmètres de confiance distincts :
+ * ┌──────────────────────────────────────────────────────────────────────────┐
+ * │ fromInternalService (INTERNAL_PRODUCT_SECRET)                            │
+ * │   GET  /internal/variants/:variantId        → order-service + cart       │
+ * │   GET  /internal/variants/:variantId/promo  → order-service              │
+ * │   GET  /internal/inventory/:variantId        → cart-service              │
+ * │   POST /internal/inventory/reserve           → order-service             │
+ * │   POST /internal/inventory/release           → order-service             │
+ * │   POST /internal/inventory/confirm           → order-service             │
+ * ├──────────────────────────────────────────────────────────────────────────┤
+ * │ fromAdminService (INTERNAL_ADMIN_SECRET)                                 │
+ * │   GET  /internal/stats                       → admin-service             │
+ * └──────────────────────────────────────────────────────────────────────────┘
  *
- * Périmètre :
- * ┌─────────────────────────────────────────────────────────────────┐
- * │ GET  /internal/variants/:variantId        → order + cart        │
- * │ GET  /internal/variants/:variantId/promo  → order-service       │
- * │ GET  /internal/inventory/:variantId       → cart-service        │
- * │ POST /internal/inventory/reserve          → order-service       │
- * │ POST /internal/inventory/release          → order-service       │
- * │ POST /internal/inventory/confirm          → order-service       │
- * │ GET  /internal/stats                      → admin-service       │
- * └─────────────────────────────────────────────────────────────────┘
+ * Les deux secrets sont distincts : un secret compromis ne donne pas accès
+ * au périmètre de l'autre service.
  */
 import { Router } from 'express';
 import { productsRepo, inventoryRepo } from '../repositories/index.js';
-import { fromInternalService } from '../middleware/internal.middleware.js';
+import { fromInternalService, fromAdminService } from '../middleware/internal.middleware.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { HTTP_STATUS } from '../constants/httpStatus.js';
 import { ValidationError } from '../utils/appError.js';
 
 const router = Router();
 
-// Toutes les routes /internal sont protégées par le secret
-router.use(fromInternalService);
-
 // ─────────────────────────────────────────────────────────────────────────────
 // VARIANTS — lecture de données produit (sans effet de bord)
+// Appelants : order-service, cart-service
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * GET /internal/variants/:variantId
- * Retourne les données brutes d'une variante : prix, poids, productId.
- * Utilisé par l'order-service pour calculer le total de la commande
- * et par le cart-service pour valider la variante avant ajout au panier.
+ * Données brutes d'une variante : prix, poids, productId.
  */
 router.get(
     '/variants/:variantId',
+    fromInternalService,
     asyncHandler(async (req, res) => {
         const { variantId } = req.params;
 
@@ -69,11 +70,11 @@ router.get(
 
 /**
  * GET /internal/variants/:variantId/promo
- * Retourne le prix effectif en tenant compte des promotions actives.
- * Utilisé par l'order-service pour snapshot le prix promotionnel au checkout.
+ * Prix effectif avec promotions actives — snapshot au moment du checkout.
  */
 router.get(
     '/variants/:variantId/promo',
+    fromInternalService,
     asyncHandler(async (req, res) => {
         const { variantId } = req.params;
 
@@ -99,15 +100,16 @@ router.get(
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INVENTORY — opérations de stock avec effet de bord
+// Appelants : order-service, cart-service
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * GET /internal/inventory/:variantId
- * Lecture du stock d'une variante sans cache (source de vérité DB).
- * Utilisé par le cart-service avant ajout au panier.
+ * Stock disponible d'une variante — lecture sans cache (source de vérité DB).
  */
 router.get(
     '/inventory/:variantId',
+    fromInternalService,
     asyncHandler(async (req, res) => {
         const { variantId } = req.params;
 
@@ -134,11 +136,11 @@ router.get(
 /**
  * POST /internal/inventory/reserve
  * Déplace du stock de "disponible" vers "réservé" lors du checkout.
- * Retourne price + weight pour que l'order-service calcule les totaux.
- * Atomique : si available_stock < quantity, la requête échoue sans effet.
+ * Atomique : échoue sans effet si available_stock < quantity.
  */
 router.post(
     '/inventory/reserve',
+    fromInternalService,
     asyncHandler(async (req, res) => {
         const { variantId, quantity } = req.body;
 
@@ -153,7 +155,7 @@ router.post(
             data: {
                 variantId,
                 price: parseFloat(inventoryEntry.price),
-                weight: 0.5, // poids par défaut (le product-service n'a pas encore de colonne weight)
+                weight: 0.5,
             },
         });
     })
@@ -162,10 +164,11 @@ router.post(
 /**
  * POST /internal/inventory/release
  * Restitue du stock réservé vers le disponible.
- * Appelé par l'order-service lors d'une annulation ou d'une session Stripe expirée.
+ * Appelé lors d'une annulation ou d'une session Stripe expirée.
  */
 router.post(
     '/inventory/release',
+    fromInternalService,
     asyncHandler(async (req, res) => {
         const { variantId, quantity } = req.body;
 
@@ -185,10 +188,11 @@ router.post(
 /**
  * POST /internal/inventory/confirm
  * Confirme la sortie définitive du stock après paiement validé.
- * Le stock réservé est décrémenté sans restaurer le disponible — la marchandise est vendue.
+ * Le stock réservé est décrémenté définitivement — la marchandise est vendue.
  */
 router.post(
     '/inventory/confirm',
+    fromInternalService,
     asyncHandler(async (req, res) => {
         const { variantId, quantity } = req.body;
 
@@ -206,16 +210,18 @@ router.post(
 );
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STATS — agrégats pour l'admin-service
+// STATS — agrégats pour le dashboard admin
+// Appelant : admin-service uniquement (secret distinct)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * GET /internal/stats
- * Retourne les compteurs produit pour le dashboard admin.
- * Appelé par l'admin-service qui agrège les stats de tous les services.
+ * Compteurs produit pour le widget dashboard admin.
+ * Protégé par INTERNAL_ADMIN_SECRET — isolé du périmètre order/cart/payment.
  */
 router.get(
     '/stats',
+    fromAdminService,
     asyncHandler(async (req, res) => {
         const [totalProducts, lowStockCount, inventoryStats] = await Promise.all([
             productsRepo.count(),

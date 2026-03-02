@@ -1,12 +1,14 @@
 /**
- * @module Middleware/Internal
+ * @module Middleware/Internal — product-service
  *
- * Protège les routes `/internal/*` du product-service.
- * Valide le header `X-Internal-Secret` envoyé par les services consommateurs
- * (order-service, cart-service, admin-service).
+ * Protège les routes `/internal/*` en vérifiant le header `X-Internal-Secret`.
  *
- * UN seul secret (`INTERNAL_PRODUCT_SECRET`) partagé avec tous les appelants.
- * La comparaison timing-safe prévient les attaques par analyse temporelle.
+ * Ces routes ne transitent jamais par le Gateway Nginx.
+ * La comparaison timing-safe prévient les attaques temporelles.
+ *
+ * Deux périmètres de confiance distincts :
+ * - `fromInternalService` → order-service, cart-service, payment-service
+ * - `fromAdminService`    → admin-service (stats dashboard uniquement)
  */
 import crypto from 'crypto';
 import { ENV } from '../config/environment.js';
@@ -17,15 +19,14 @@ const HEADER_NAME = 'x-internal-secret';
 
 /**
  * Comparaison en temps constant pour éviter les attaques temporelles.
- * Même longueur de traitement même si les secrets diffèrent à la première position.
+ * Un padding factice est exécuté même si les longueurs diffèrent
+ * afin de garantir un temps de traitement constant.
  */
 const timingSafeEqual = (provided, expected) => {
     try {
         const providedBuf = Buffer.from(provided, 'utf8');
         const expectedBuf = Buffer.from(expected, 'utf8');
 
-        // Si les longueurs diffèrent, on effectue quand même la comparaison
-        // pour ne pas fuiter d'information via le timing
         if (providedBuf.length !== expectedBuf.length) {
             crypto.timingSafeEqual(expectedBuf, expectedBuf);
             return false;
@@ -38,11 +39,11 @@ const timingSafeEqual = (provided, expected) => {
 };
 
 /**
- * Valide les appels entrants depuis n'importe quel service interne.
- * Utilise ENV.internalSecret (INTERNAL_PRODUCT_SECRET) — centralisé dans
- * environment.js pour rester cohérent avec tous les autres services.
+ * Génère un middleware de validation du secret interne.
+ * Factorisé pour supporter plusieurs périmètres de confiance
+ * sans dupliquer la logique de vérification.
  */
-export const fromInternalService = (req, res, next) => {
+const validateSecret = (expectedSecret) => (req, res, next) => {
     const provided = req.headers[HEADER_NAME];
 
     if (!provided) {
@@ -52,9 +53,7 @@ export const fromInternalService = (req, res, next) => {
         });
     }
 
-    const expected = ENV.internalSecret;
-
-    if (!expected || !timingSafeEqual(provided, expected)) {
+    if (!expectedSecret || !timingSafeEqual(provided, expectedSecret)) {
         logError(new Error('Tentative accès interne avec secret invalide'), {
             context: 'product-service.internal.middleware',
             ip: req.ip,
@@ -69,3 +68,15 @@ export const fromInternalService = (req, res, next) => {
 
     next();
 };
+
+/**
+ * Valide les appels entrants depuis les services pairs (order, cart, payment).
+ * Utilise `INTERNAL_PRODUCT_SECRET`.
+ */
+export const fromInternalService = validateSecret(ENV.internalSecret);
+
+/**
+ * Valide les appels entrants depuis l'admin-service.
+ * Utilise `INTERNAL_ADMIN_SECRET` — secret distinct pour isoler le périmètre admin.
+ */
+export const fromAdminService = validateSecret(ENV.adminSecret);

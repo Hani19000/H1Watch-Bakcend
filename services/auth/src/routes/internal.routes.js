@@ -6,19 +6,18 @@
  *
  * Périmètre :
  * ┌────────────────────────────────────────────────────────────────────┐
- * │ GET  /internal/admin/users               → liste paginée           │
- * │ GET  /internal/admin/users/count         → total utilisateurs      │
- * │ PATCH /internal/admin/users/:id/privileges → rôle + statut actif   │
- * │ DELETE /internal/admin/users/:id         → suppression compte      │
- * │ POST /internal/admin/crons/sessions-cleanup → purge tokens expirés │
+ * │ GET    /internal/admin/users                → liste paginée        │
+ * │ GET    /internal/admin/users/count          → total utilisateurs   │
+ * │ PATCH  /internal/admin/users/:id/privileges → rôle + statut actif │
+ * │ DELETE /internal/admin/users/:id            → suppression compte   │
+ * │ POST   /internal/admin/crons/sessions-cleanup → purge tokens       │
  * └────────────────────────────────────────────────────────────────────┘
  *
  * Toutes les routes sont protégées par `fromAdminService`.
- * La logique métier reste dans `usersService` et `sessionsCleanupJob`
- * — cette couche route ne fait que déléguer et formater la réponse HTTP.
+ * La logique métier reste dans `userService` et `sessionsCleanupJob`.
  */
 import { Router } from 'express';
-import { usersService } from '../services/users.service.js';
+import { userService } from '../services/users.service.js';
 import { usersRepo } from '../repositories/index.js';
 import { sessionsCleanupJob } from '../jobs/sessions.cron.js';
 import { fromAdminService } from '../middlewares/internal.middleware.js';
@@ -48,7 +47,7 @@ router.get(
             limit: parseInt(req.query.limit, 10) || 10,
         };
 
-        const result = await usersService.listAllUsers(params);
+        const result = await userService.listAllUsers(params);
 
         res.status(HTTP_STATUS.OK).json({
             status: 'success',
@@ -77,8 +76,8 @@ router.get(
 /**
  * PATCH /internal/admin/users/:id/privileges
  * Met à jour le rôle et/ou le statut actif d'un utilisateur.
- * Les gardes métier (anti-auto-modification, anti-suppression d'admin)
- * sont centralisées dans usersService.updatePrivileges.
+ * Les gardes métier (anti-auto-modification, anti-modification d'admin)
+ * sont centralisées dans userService.updatePrivileges.
  */
 router.patch(
     '/users/:id/privileges',
@@ -94,7 +93,7 @@ router.patch(
 
         validateUUID(adminId, 'adminId');
 
-        const updated = await usersService.updatePrivileges(id, { role, isActive }, adminId);
+        const updated = await userService.updatePrivileges(id, { role, isActive }, adminId);
 
         res.status(HTTP_STATUS.OK).json({
             status: 'success',
@@ -122,7 +121,7 @@ router.delete(
 
         validateUUID(adminId, 'adminId');
 
-        await usersService.deleteUser(id, adminId);
+        await userService.deleteUser(id, adminId);
 
         res.status(HTTP_STATUS.NO_CONTENT).send();
     })

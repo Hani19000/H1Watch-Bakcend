@@ -1,5 +1,5 @@
 /**
- * @module Config/Queue
+ * @module Config/Queue — notification-service
  *
  * Connexion Redis partagée pour BullMQ (IORedis).
  * Un seul client Redis est réutilisé par la Queue et le Worker
@@ -9,9 +9,11 @@
  * BullMQ nécessite IORedis pour ses opérations Lua atomiques (EVAL).
  * Le client natif `redis` de npm n'est pas compatible avec BullMQ.
  *
- * Le préfixe `notification:` isole les clés BullMQ de celles des autres
- * services dans l'instance Redis partagée Upstash, exactement comme
- * les schémas Neon isolent les tables PostgreSQL.
+ * IMPORTANT — Isolation des clés BullMQ :
+ * Le préfixe `{notification}` est configuré sur la Queue dans queue.service.js
+ * et NON sur la connexion IORedis. BullMQ gère lui-même le namespacing via
+ * l'option `prefix` de la Queue — passer `keyPrefix` à IORedis lève une
+ * erreur au démarrage : "BullMQ: ioredis does not support ioredis prefixes".
  */
 import IORedis from 'ioredis';
 import { ENV } from './environment.js';
@@ -21,8 +23,6 @@ import { ENV } from './environment.js';
 export const redisConnection = new IORedis(ENV.redis.url, {
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
-    // Préfixe appliqué à toutes les clés pour isoler BullMQ des autres usages Redis
-    keyPrefix: 'notification:',
 });
 
 redisConnection.on('connect', () => {

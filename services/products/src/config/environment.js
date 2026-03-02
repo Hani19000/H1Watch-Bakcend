@@ -2,7 +2,8 @@
  * @module Config/Environment — product-service
  *
  * Source unique de vérité pour toutes les variables d'environnement.
- * Valide les variables critiques au démarrage (fail-fast).
+ * Valide les variables critiques au démarrage (fail-fast) : une variable
+ * manquante est détectée au lancement, pas lors d'une requête en production.
  */
 import 'dotenv/config';
 
@@ -22,6 +23,8 @@ const requiredEnv = [
 if (process.env.NODE_ENV === 'production') {
     requiredEnv.push('SENTRY_DSN');
 }
+
+// ── Validation PostgreSQL ─────────────────────────────────────────────────────
 
 const hasPostgresConfig =
     process.env.DATABASE_URL ||
@@ -70,7 +73,7 @@ export const ENV = Object.freeze({
     },
 
     // Secrets entrants : valident les appels reçus depuis d'autres services.
-    // Chaque secret est associé à un seul service appelant.
+    // Secrets distincts pour isoler les périmètres de confiance.
     internalSecret: process.env.INTERNAL_PRODUCT_SECRET,   // order, cart, payment
     adminSecret: process.env.INTERNAL_ADMIN_SECRET,        // admin-service uniquement
 
@@ -78,6 +81,14 @@ export const ENV = Object.freeze({
         cloudName: process.env.CLOUDINARY_CLOUD_NAME,
         apiKey: process.env.CLOUDINARY_API_KEY,
         apiSecret: process.env.CLOUDINARY_API_SECRET,
+    },
+
+    // Valeurs lues par security.js — ne pas supprimer sans mettre à jour security.js.
+    rateLimit: {
+        windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 min
+        max: Number(process.env.RATE_LIMIT_MAX) || 100,
+        authWindowMs: Number(process.env.AUTH_RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
+        authMax: Number(process.env.AUTH_RATE_LIMIT_MAX) || 5,
     },
 
     cors: {

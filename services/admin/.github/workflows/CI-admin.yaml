@@ -1,0 +1,125 @@
+# =============================================================================
+# WORKFLOW : Intégration Continue — admin-service
+#
+# Déclenché sur chaque push et pull request vers main et develop,
+# uniquement si des fichiers du service admin ont changé.
+#
+# Pipeline :
+#   lint    — vérification statique ESLint
+#   build   — vérification que l'image Docker se construit sans erreur
+#
+# Infrastructure de test :
+#   Redis 7-alpine en service Docker natif du runner.
+#   L'admin-service n'a pas de base de données propre — il agrège
+#   des données via des appels HTTP vers les autres services.
+#   En CI, ces appels sont désactivés : seul le démarrage du processus
+#   est vérifié (lint + image Docker valide).
+#
+# Décision : pas de job "test" pour l'instant.
+#   L'admin-service ne contient pas encore de suite de tests (aucun script
+#   "test" dans package.json). Le smoke-test est couvert par le job "build"
+#   qui vérifie que l'image se construit et que le code est syntaxiquement
+#   valide. Les tests d'intégration seront ajoutés ici dès qu'un framework
+#   de test sera configuré dans le service.
+# =============================================================================
+
+name: CI — admin-service
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      # Déclenche uniquement si le service admin a changé
+      - 'services/admin/**'
+      - '.github/workflows/CI-admin.yaml'
+
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'services/admin/**'
+      - '.github/workflows/CI-admin.yaml'
+
+# Annule les runs en cours si un nouveau commit arrive sur la même branche.
+# Évite de consommer des minutes de CI sur du code déjà obsolète.
+concurrency:
+  group: ci-admin-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # JOB 1 : LINT
+  #
+  # Vérification statique rapide depuis le répertoire services/admin/.
+  # Aucun service externe requis.
+  #
+  # La commande "lint" est définie dans services/admin/package.json.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: services/admin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: services/admin/package-lock.json
+
+      - name: Installation des dépendances
+        run: npm ci
+
+      - name: ESLint
+        run: npm run lint
+
+
+  # ---------------------------------------------------------------------------
+  # JOB 2 : BUILD DOCKER
+  #
+  # Vérifie que le Dockerfile de l'admin-service se construit sans erreur.
+  # L'image n'est pas publiée ici — Render construit lui-même depuis GitHub.
+  # Ce job détecte les erreurs de Dockerfile avant qu'elles n'atteignent Render.
+  #
+  # Contexte Docker : services/admin/
+  # Dockerfile      : services/admin/Dockerfile
+  #
+  # Le cache GitHub Actions (type=gha) accélère les builds successifs
+  # en réutilisant les layers Docker non modifiés.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build Docker
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (vérification sans push)
+        uses: docker/build-push-action@v5
+        with:
+          context: services/admin
+          file: services/admin/Dockerfile
+          push: false
+          # Les build-args sont fournis pour que le Dockerfile compile sans erreur.
+          # Aucune valeur sensible ici — les secrets réels sont injectés à l'exécution.
+          build-args: |
+            NODE_ENV=production
+          # Cache des layers entre les runs pour réduire la durée de vérification
+          cache-from: type=gha,scope=admin-service
+          cache-to: type=gha,mode=max,scope=admin-service

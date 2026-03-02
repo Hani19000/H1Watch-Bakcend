@@ -17,7 +17,7 @@ import inventoryRoutes from './inventory.routes.js';
 import categoryRoutes from './categories.routes.js';
 import promotionRoutes from './promotions.routes.js';
 import internalRoutes from './internal.routes.js';
-import internalAdminInventoryRoutes from './internal.admin.inventory.routes.js';
+import internalAdminInventoryRoutes from './internal.admin-inventory.routes.js';
 
 const router = Router();
 
@@ -33,8 +33,8 @@ router.use('/api/v1/promotions', generalLimiter, promotionRoutes);
 router.use('/internal', internalRoutes);
 
 // Périmètre admin-service uniquement — secret distinct (INTERNAL_ADMIN_SECRET).
-// Monter une instance Router séparée évite le bug Express de double-montage
-// (un même Router monté deux fois corromprait la résolution des chemins).
+// Instance Router SÉPARÉE (fichier distinct) : monter la même instance sur deux
+// chemins corromprait la résolution interne d'Express (le second path écrase le premier).
 router.use('/internal/admin', internalAdminInventoryRoutes);
 
 export default router;

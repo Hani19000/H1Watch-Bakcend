@@ -2,14 +2,17 @@
  * @module Routes/Internal/Admin/Inventory — product-service
  *
  * Endpoints d'inventaire réservés à l'admin-service.
- * Protégés par INTERNAL_ADMIN_SECRET via fromAdminService — jamais exposés par le Gateway.
+ * Protégés par INTERNAL_ADMIN_SECRET via fromAdminService.
  *
- * Pourquoi ce fichier plutôt que de laisser le frontend appeler /inventory directement ?
- * Les routes publiques /inventory exigent un JWT Bearer valide (protect + restrictTo('ADMIN')).
- * Faire valider le JWT par le product-service crée un couplage sur JWT_ACCESS_SECRET et
- * oblige à synchroniser ce secret entre deux services distincts.
- * En passant par l'admin-service (qui valide lui-même le JWT), le product-service
- * n'a besoin que de son secret interne — séparation de responsabilité respectée.
+ * Ces routes ne transitent JAMAIS par le Gateway Nginx.
+ * Elles sont appelées exclusivement en réseau interne Render,
+ * depuis l'admin-service via productClient.
+ *
+ * Pourquoi un fichier séparé de internal.routes.js ?
+ * Le secret entrant est INTERNAL_ADMIN_SECRET, distinct de INTERNAL_PRODUCT_SECRET
+ * utilisé par order-service, cart-service et payment-service.
+ * Des secrets distincts isolent les périmètres de confiance :
+ * un secret compromis dans un service ne donne pas accès à l'autre périmètre.
  */
 import { Router } from 'express';
 import { fromAdminService } from '../middleware/internal.middleware.js';
@@ -40,8 +43,9 @@ router.get(
 
 /**
  * GET /internal/admin/inventory/alerts
- * Articles en stock bas — seuil défini dans inventoryService.
- * Exposé ici pour éviter d'exiger le JWT du frontend dans le product-service.
+ * Articles dont le stock est sous le seuil d'alerte.
+ * Déclaré avant /inventory/:variantId pour éviter qu'Express
+ * interprète "alerts" comme une valeur de paramètre.
  */
 router.get(
     '/inventory/alerts',
@@ -59,8 +63,7 @@ router.get(
 
 /**
  * PATCH /internal/admin/inventory/:variantId/adjust
- * Ajustement manuel du stock (réception, perte, correction d'inventaire).
- * La logique d'ajustement reste dans inventoryService — ce handler ne fait que déléguer.
+ * Ajustement manuel du stock : réception, perte, correction d'inventaire.
  */
 router.patch(
     '/inventory/:variantId/adjust',

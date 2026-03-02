@@ -1,11 +1,9 @@
 /**
- * @module Config/Environment
+ * @module Config/Environment — auth-service
  *
- * Point d'entrée unique pour toutes les variables d'environnement
- * de l'auth-service.
- *
- * Centraliser ici permet de détecter les variables manquantes au démarrage
- * plutôt qu'à l'exécution d'une requête, et d'éviter les process.env éparpillés.
+ * Source unique de vérité pour toutes les variables d'environnement.
+ * Valide les variables critiques au démarrage (fail-fast) : une variable
+ * manquante est détectée au lancement, pas lors d'une requête en production.
  */
 import 'dotenv/config';
 
@@ -18,8 +16,8 @@ const requiredEnv = [
     'REDIS_URL',
     'CLIENT_URL',
     'ORDER_SERVICE_URL',
-    'INTERNAL_AUTH_SECRET',
-    // Notification-service — emails transactionnels déportés (welcome, password reset)
+    'INTERNAL_AUTH_SECRET',          // X-Internal-Secret émis par ce service (order-service l'utilise)
+    'INTERNAL_ADMIN_SECRET',         // Secret partagé avec l'admin-service (routes /internal/admin/*)
     'NOTIFICATION_SERVICE_URL',
     'INTERNAL_NOTIFICATION_SECRET',
 ];
@@ -66,7 +64,7 @@ export const ENV = Object.freeze({
         postgres: {
             url: process.env.DATABASE_URL,
             host: process.env.POSTGRES_HOST,
-            port: Number(process.env.POSTGRES_PORT),
+            port: Number(process.env.POSTGRES_PORT) || 5432,
             user: process.env.POSTGRES_USER,
             password: process.env.POSTGRES_PASSWORD,
             database: process.env.POSTGRES_DB,
@@ -78,40 +76,33 @@ export const ENV = Object.freeze({
 
     jwt: {
         accessTokenSecret: process.env.JWT_ACCESS_SECRET,
-        accessTokenExpiry: process.env.JWT_ACCESS_EXPIRY || '15m',
         refreshTokenSecret: process.env.JWT_REFRESH_SECRET,
+        accessTokenExpiry: process.env.JWT_ACCESS_EXPIRY || '15m',
         refreshTokenExpiry: process.env.JWT_REFRESH_EXPIRY || '7d',
     },
 
-    bcrypt: {
-        iterations: Number(process.env.BCRYPT_ITERATIONS) || 100000,
-        saltLength: Number(process.env.BCRYPT_SALT_LENGTH) || 16,
-    },
-
-    rateLimit: {
-        windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 900000,
-        max: Number(process.env.RATE_LIMIT_MAX) || 100,
-        authWindowMs: Number(process.env.RATE_LIMIT_AUTH_WINDOW_MS) || 3600000,
-        authMax: Number(process.env.RATE_LIMIT_AUTH_MAX) || 5,
-    },
-
-    sentry: {
-        dsn: process.env.SENTRY_DSN,
-        tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE) || 1.0,
-    },
-
-    // Communication inter-services
-    services: {
-        orderServiceUrl: process.env.ORDER_SERVICE_URL,
-        internalSecret: process.env.INTERNAL_AUTH_SECRET,         // X-Internal-Secret exposé par ce service
+    // Secrets entrants : valident les appels reçus depuis d'autres services
+    internal: {
+        authSecret: process.env.INTERNAL_AUTH_SECRET,
+        adminSecret: process.env.INTERNAL_ADMIN_SECRET,
         notificationServiceUrl: process.env.NOTIFICATION_SERVICE_URL,
-        notificationSecret: process.env.INTERNAL_NOTIFICATION_SECRET, // X-Internal-Secret vers notification-service
+        notificationSecret: process.env.INTERNAL_NOTIFICATION_SECRET,
         httpTimeoutMs: Number(process.env.INTERNAL_HTTP_TIMEOUT_MS) || 5000,
     },
 
+    services: {
+        orderServiceUrl: process.env.ORDER_SERVICE_URL,
+    },
+
     cors: {
-        origins: process.env.CORS_ORIGINS?.split(',') || ['http://localhost:5173'],
+        origins: process.env.CORS_ORIGINS?.split(',').map((o) => o.trim()) || [
+            'http://localhost:5173',
+        ],
     },
 
     clientUrl: process.env.CLIENT_URL || 'http://localhost:5173',
+
+    sentry: {
+        dsn: process.env.SENTRY_DSN,
+    },
 });

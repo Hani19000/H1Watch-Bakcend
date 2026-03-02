@@ -17,6 +17,7 @@ import inventoryRoutes from './inventory.routes.js';
 import categoryRoutes from './categories.routes.js';
 import promotionRoutes from './promotions.routes.js';
 import internalRoutes from './internal.routes.js';
+import internalAdminInventoryRoutes from './internal.admin-inventory.routes.js';
 
 const router = Router();
 
@@ -27,6 +28,12 @@ router.use('/api/v1/categories', generalLimiter, categoryRoutes);
 router.use('/api/v1/promotions', generalLimiter, promotionRoutes);
 
 // ─── Routes inter-services (sans rate limiter) ───────────────────────────────
+// Routes existantes : order-service, cart-service, payment-service
 router.use('/internal', internalRoutes);
+
+// Routes d'inventaire exclusivement réservées à l'admin-service.
+// Séparées de /internal pour disposer d'un secret distinct (INTERNAL_ADMIN_SECRET)
+// et éviter qu'un secret order/cart/payment compromis donne accès à l'inventaire admin.
+router.use('/internal/admin', internalAdminInventoryRoutes);
 
 export default router;

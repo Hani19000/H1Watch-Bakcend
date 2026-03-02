@@ -10,6 +10,7 @@ import { protect, requireAdmin } from '../middlewares/auth.middleware.js';
 import { dashboardController } from '../controllers/dashboard.controller.js';
 import { usersController } from '../controllers/users.controller.js';
 import { cronsController } from '../controllers/crons.controller.js';
+import { inventoryController } from '../controllers/inventory.controller.js';
 
 const router = Router();
 
@@ -25,6 +26,19 @@ router.get('/sales-report', dashboardController.getSalesReport);
 
 // Invalidation manuelle du cache — utile après une opération batch
 router.post('/cache/invalidate', dashboardController.invalidateCache);
+
+// ── Gestion de l'inventaire ───────────────────────────────────────────────────
+// Les appels sont délégués au product-service via productClient (secret interne).
+// Cela évite de faire valider le JWT de l'admin par le product-service et maintient
+// la séparation de responsabilité : l'admin-service est l'unique validateur du JWT admin.
+//
+// ORDRE DES ROUTES : /alerts déclaré avant /:variantId pour éviter qu'Express
+// interprète "alerts" comme une valeur de paramètre variantId.
+
+router.get('/inventory', inventoryController.getAllInventory);
+router.get('/inventory/alerts', inventoryController.getLowStockAlerts);
+router.patch('/inventory/:variantId/adjust', inventoryController.adjustStock);
+router.patch('/inventory/restock/:variantId', inventoryController.restockVariant);
 
 // ── Gestion des utilisateurs ──────────────────────────────────────────────────
 // Opérations déléguées à l'auth-service via authClient.

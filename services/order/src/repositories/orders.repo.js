@@ -265,10 +265,31 @@ export const ordersRepo = {
     const offset = (parsedPage - 1) * parsedLimit;
 
     const values = [userId];
+
+    // ── Règles de visibilité dans l'historique profil ─────────────────────
+    //
+    // Sont EXCLUES de l'historique :
+    //   1. Commandes CANCELLED  : annulées manuellement par l'utilisateur
+    //      ou auto-annulées par le cron → l'utilisateur ne doit pas les voir.
+    //
+    //   2. Commandes PENDING > 15 min : session de paiement abandonnée
+    //      (l'utilisateur n'a pas finalisé le paiement Stripe dans les 15 min).
+    //      Ces commandes sont techniquement toujours PENDING en base mais
+    //      correspondent à des checkouts orphelins — les masquer évite de
+    //      polluer l'historique avec des tentatives non abouties.
+    //
+    // Sont INCLUSES : PENDING < 15 min (checkout en cours), PAID, PROCESSING,
+    //                 SHIPPED, DELIVERED — toutes les commandes actives ou finalisées.
+    //
+    const visibilityFilter = `
+      AND o.status != 'CANCELLED'
+      AND NOT (o.status = 'PENDING' AND o.created_at < NOW() - INTERVAL '15 minutes')
+    `;
+
     let statusFilter = '';
     if (status) {
       values.push(status);
-      statusFilter = `AND status = $${values.length}`;
+      statusFilter = `AND o.status = $${values.length}`;
     }
 
     // Compte total + données en parallèle pour éviter deux aller-retours séquentiels
@@ -285,14 +306,14 @@ export const ordersRepo = {
              FROM orders o
              LEFT JOIN order_items oi ON oi.order_id = o.id
              LEFT JOIN product.product_variants pv ON pv.id = oi.variant_id
-             WHERE o.user_id = $1 ${statusFilter}
+             WHERE o.user_id = $1 ${visibilityFilter} ${statusFilter}
              GROUP BY o.id
              ORDER BY o.created_at DESC
              LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
         [...values, parsedLimit, offset]
       ),
       pgPool.query(
-        `SELECT COUNT(*) FROM orders WHERE user_id = $1 ${statusFilter}`,
+        `SELECT COUNT(*) FROM orders o WHERE o.user_id = $1 ${visibilityFilter} ${statusFilter}`,
         values
       ),
     ]);

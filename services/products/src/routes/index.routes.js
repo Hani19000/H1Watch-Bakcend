@@ -17,7 +17,7 @@ import inventoryRoutes from './inventory.routes.js';
 import categoryRoutes from './categories.routes.js';
 import promotionRoutes from './promotions.routes.js';
 import internalRoutes from './internal.routes.js';
-import internalAdminInventoryRoutes from './internal.admin-inventory.routes.js';
+import internalAdminInventoryRoutes from './inventory.routes.js';
 
 const router = Router();
 

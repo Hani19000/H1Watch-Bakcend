@@ -52,10 +52,10 @@ export const startNotificationWorker = () => {
 
         // Log d'audit persistant — fire-and-forget pour ne pas bloquer le worker
         notificationsRepo.logSuccess({
-            jobId:          job.id,
-            type:           job.data.type,
+            jobId: job.id,
+            type: job.data.type,
             recipientEmail: job.data.to,
-            attempts:       job.attemptsMade + 1,
+            attempts: job.attemptsMade + 1,
         }).catch((err) =>
             logError(err, { context: 'notificationsRepo.logSuccess', jobId: job.id })
         );
@@ -65,23 +65,23 @@ export const startNotificationWorker = () => {
         const isLastAttempt = job.attemptsMade >= (job.opts.attempts ?? ENV.queue.maxAttempts);
 
         logError(err, {
-            context:      'NotificationWorker.failed',
-            jobId:        job?.id,
-            type:         job?.data?.type,
-            to:           job?.data?.to,
+            context: 'NotificationWorker.failed',
+            jobId: job?.id,
+            type: job?.data?.type,
+            to: job?.data?.to,
             attemptsMade: job?.attemptsMade,
-            isFinal:      isLastAttempt,
+            isFinal: isLastAttempt,
         });
 
         // On ne log en base qu'à l'épuisement des tentatives.
         // Les tentatives intermédiaires sont gérées exclusivement par BullMQ.
         if (isLastAttempt) {
             notificationsRepo.logFailure({
-                jobId:          job.id,
-                type:           job.data.type,
+                jobId: job.id,
+                type: job.data.type,
                 recipientEmail: job.data.to,
-                attempts:       job.attemptsMade,
-                errorMessage:   err?.message,
+                attempts: job.attemptsMade,
+                errorMessage: err?.message,
             }).catch((dbErr) =>
                 logError(dbErr, { context: 'notificationsRepo.logFailure', jobId: job?.id })
             );

@@ -1,79 +1,59 @@
 # =============================================================================
-# WORKFLOW : Intégration Continue (CI)
+# WORKFLOW : CI — Validation globale du monorepo
 #
-# Déclenché sur chaque push et pull request vers main et develop.
+# Ce workflow remplace l'ancien CI du monolith, qui est supprimé.
+# Chaque microservice possède son propre CI déclenché sur son répertoire :
+#   services/auth/.github/workflows/CI.yaml
+#   services/order/.github/workflows/ci.yaml
+#   services/products/.github/workflows/CI.yaml
+#   services/payment/.github/workflows/CI.yaml
+#   services/notification/.github/workflows/CI.yaml
+#   services/cart/.github/workflows/CI.yaml
+#   services/admin/.github/workflows/CI-admin.yaml
+#   gateway/.github/workflows/ci-gateway.yaml
 #
-# Pipeline :
-#   lint   -- vérification statique ESLint
-#   test   -- tests d'intégration avec PostgreSQL 15 et Redis 7 en services locaux
-#
-# Note : le job "build Docker" du monolith a été supprimé.
-# Le monolith est entièrement migré en microservices — docker/Dockerfile n'est
-# plus utilisé en production. Chaque service microservice dispose de son propre
-# Dockerfile dans services/<service>/Dockerfile, déployé directement par Render.
+# Ce workflow valide uniquement les fichiers partagés à la racine du monorepo
+# (render.yaml, docker-compose.yml, migrations SQL, scripts de configuration).
 # =============================================================================
 
-name: CI
+name: CI — Monorepo
 
 on:
   push:
     branches:
       - main
       - develop
+    # Déclenché uniquement si des fichiers hors services/ changent.
+    # Les changements dans services/* sont pris en charge par les CI par service.
+    paths-ignore:
+      - 'services/**'
+      - 'gateway/**'
   pull_request:
     branches:
       - main
       - develop
+    paths-ignore:
+      - 'services/**'
+      - 'gateway/**'
 
-# Annule les runs en cours si un nouveau commit arrive sur la même branche.
-# Evite de consommer des minutes de CI sur du code déjà remplacé.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-monorepo-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
 
   # ---------------------------------------------------------------------------
-  # JOB 1 : LINT
-  # Vérification statique rapide, sans service externe.
-  # ---------------------------------------------------------------------------
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - name: Installation des dépendances
-        run: npm ci
-
-      - name: ESLint
-        run: npm run lint
-
-
-  # ---------------------------------------------------------------------------
-  # JOB 2 : TESTS D'INTEGRATION
+  # VALIDATION SQL — vérifie la syntaxe des migrations partagées.
   #
-  # Démarre PostgreSQL 15-alpine et Redis 7-alpine comme services Docker
-  # natifs du runner. Ils sont disponibles sur localhost avant le premier step.
-  #
-  # Le schéma est appliqué manuellement dans l'ordre correct :
-  #   1. init-postgres.sql                   -- schéma, types, triggers, seed
-  #   2. 002_production_optimizations.sql    -- index, vues, fonctions, password_history
+  # Les migrations à la racine (init-postgres.sql, migrations/) peuvent encore
+  # être utilisées pour les tests d'intégration locaux ou une future base partagée.
+  # Cette étape détecte les erreurs de syntaxe SQL avant un merge.
   # ---------------------------------------------------------------------------
-  test:
-    name: Tests d'intégration
+  validate-sql:
+    name: Validate SQL migrations
     runs-on: ubuntu-latest
 
     services:
-
       postgres:
         image: postgres:15-alpine
         env:
@@ -88,102 +68,55 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    # Variables consommées par environment.js (validation fail-fast au démarrage).
-    # Les valeurs sensibles sont fictives -- elles n'ont aucun impact hors des tests.
-    env:
-      NODE_ENV: test
+      # Vérifie qu'init-postgres.sql est syntaxiquement valide.
+      # ON_ERROR_STOP=1 interrompt à la première erreur SQL.
+      - name: Validate init-postgres.sql
+        run: |
+          PGPASSWORD=postgres psql \
+            -h localhost \
+            -U postgres \
+            -d ecom_watch_test \
+            -v ON_ERROR_STOP=1 \
+            -f init-postgres.sql
+          echo "init-postgres.sql OK"
 
-      # Base de données locale du runner
-      POSTGRES_HOST: localhost
-      POSTGRES_PORT: 5432
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: ecom_watch_test
+      # Vérifie les migrations dans l'ordre de numérotation.
+      # Cette commande est idempotente grâce aux IF NOT EXISTS.
+      - name: Validate migration 002
+        run: |
+          PGPASSWORD=postgres psql \
+            -h localhost \
+            -U postgres \
+            -d ecom_watch_test \
+            -v ON_ERROR_STOP=1 \
+            -f migrations/002_production_optimizations.sql
+          echo "migration 002 OK"
 
-      # Redis local du runner
-      REDIS_HOST: localhost
-      REDIS_PORT: 6379
-
-      # JWT -- valeurs de test uniquement, jamais utilisées en production
-      JWT_ACCESS_SECRET: ci-access-secret-not-for-production
-      JWT_REFRESH_SECRET: ci-refresh-secret-not-for-production
-      JWT_ACCESS_EXPIRES_IN: 15m
-      JWT_REFRESH_EXPIRES_IN: 7d
-
-      # Stripe -- clé test sans impact financier
-      STRIPE_SECRET_KEY: sk_test_placeholder
-      STRIPE_WEBHOOK_SECRET: whsec_placeholder
-
-      # Cloudinary -- désactivé en test
-      CLOUDINARY_CLOUD_NAME: test
-      CLOUDINARY_API_KEY: test
-      CLOUDINARY_API_SECRET: test
-
-      # Email Resend -- désactivé en test
-      RESEND_API_KEY: re_test_placeholder
-      EMAIL_FROM: noreply@ecom-watch.local
-
-      # Application
-      CLIENT_URL: http://localhost:3000
-      PORT: 3001
-
-      # Sentry -- valeur fictive pour passer la validation
-      SENTRY_DSN: https://public@sentry.example.com/1
-
-      # Inter-services -- order-service
-      ORDER_SERVICE_URL: http://localhost:3004
-      INTERNAL_ORDER_SECRET: ci-order-secret-not-for-production
+  # ---------------------------------------------------------------------------
+  # VALIDATION render.yaml — vérifie que le manifeste de déploiement est valide.
+  # Détecte les erreurs YAML avant qu'elles atteignent Render.
+  # ---------------------------------------------------------------------------
+  validate-render-yaml:
+    name: Validate render.yaml
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - name: Installation des dépendances
-        run: npm ci
-
-      # Applique le schéma complet : tables, enums, triggers, données de test.
-      - name: Initialisation du schéma
+      - name: Validate render.yaml syntax
         run: |
-          PGPASSWORD=postgres psql \
-            -h localhost \
-            -U postgres \
-            -d ecom_watch_test \
-            -f init-postgres.sql
-
-      # Applique les optimisations : index, vues matérialisées, fonctions
-      # d'archivage, password_history et password_reset_tokens.
-      - name: Application de la migration 002
-        run: |
-          PGPASSWORD=postgres psql \
-            -h localhost \
-            -U postgres \
-            -d ecom_watch_test \
-            -f migrations/002_production_optimizations.sql
-
-      - name: Exécution des tests
-        run: npm test
-
-      # Upload du rapport de couverture. Non bloquant si CODECOV_TOKEN est absent.
-      - name: Upload couverture Codecov
-        uses: codecov/codecov-action@v4
-        if: always()
-        continue-on-error: true
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+          python3 -c "
+          import yaml, sys
+          with open('render.yaml') as f:
+              try:
+                  yaml.safe_load(f)
+                  print('render.yaml: syntaxe valide')
+              except yaml.YAMLError as e:
+                  print(f'render.yaml: erreur YAML — {e}')
+                  sys.exit(1)
+          "

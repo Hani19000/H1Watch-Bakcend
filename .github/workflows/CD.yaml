@@ -1,166 +1,62 @@
 # =============================================================================
-# WORKFLOW : Déploiement Continu (CD)
+# WORKFLOW : CD — Monorepo (documentation)
 #
-# Déclenché uniquement sur les pushs vers main, après validation par la CI.
+# Le monolith a été supprimé. Ce workflow ne déclenche plus de déploiement.
 #
-# Pipeline :
-#   migrate   -- applique les migrations SQL en attente sur Neon (production)
-#   deploy    -- déclenche le redéploiement du service Render via deploy hook
+# ARCHITECTURE DE DÉPLOIEMENT ACTUELLE :
+# Chaque microservice dispose de son propre workflow CD, déclenché
+# automatiquement par les paths: correspondant à son répertoire.
 #
-# Infrastructure cible :
-#   API        -- Render Web Service (déploiement depuis GitHub, build interne)
-#   Base       -- Neon PostgreSQL (serverless, connection string standard)
-#   Cache      -- Render Redis (ou Upstash, transparent pour ce workflow)
+#   Service          Workflow                                Secret deploy hook
+#   ─────────────────────────────────────────────────────────────────────────
+#   Gateway          gateway/.github/workflows/cd-gateway.yaml  RENDER_GATEWAY_DEPLOY_HOOK
+#   Auth             services/auth/.github/workflows/CD.yaml     RENDER_AUTH_DEPLOY_HOOK
+#   Order            services/order/.github/workflows/cd.yaml    RENDER_ORDER_DEPLOY_HOOK
+#   Products         services/products/.github/workflows/CD.yaml RENDER_PRODUCT_DEPLOY_HOOK
+#   Payment          services/payment/.github/workflows/CD.yaml  RENDER_PAYMENT_DEPLOY_HOOK
+#   Notification     services/notification/.github/workflows/CD.yaml  RENDER_NOTIFICATION_DEPLOY_HOOK
+#   Cart             services/cart/.github/workflows/CD.yaml     RENDER_DEPLOY_HOOK_CART_URL
+#   Admin            services/admin/.github/workflows/CD-admin.yaml   RENDER_ADMIN_DEPLOY_HOOK_URL
 #
-# Secrets GitHub requis (Settings > Secrets and variables > Actions) :
-#   NEON_DATABASE_URL      -- connection string Neon de production
-#                            (ex: postgresql://user:pass@ep-xxx.neon.tech/dbname?sslmode=require)
-#   RENDER_DEPLOY_HOOK_URL -- URL du deploy hook Render
-#                            (Render dashboard > Service > Settings > Deploy Hook)
+# POUR DÉCLENCHER UN DÉPLOIEMENT :
+#   Modifier un fichier dans le répertoire du service cible et merger sur main.
+#   Le CD correspondant se déclenche automatiquement sur les paths: configurés.
+#
+# SUPPRESSION DE CE FICHIER :
+#   Ce fichier peut être supprimé du repository.
+#   Il est conservé temporairement pour documenter la migration.
 # =============================================================================
 
-name: CD
+name: CD — Monorepo (obsolète)
 
 on:
-  push:
-    branches:
-      - main
-
-# Un seul déploiement à la fois.
-# On ne cancel pas pour éviter de laisser la base dans un état intermédiaire.
-concurrency:
-  group: cd-production
-  cancel-in-progress: false
+  # Désactivé — ce workflow ne fait rien.
+  # Les déploiements sont gérés par les CD par service.
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Ce workflow est obsolète. Utiliser le CD du service concerné.'
+        required: false
 
 jobs:
-
-  # ---------------------------------------------------------------------------
-  # JOB 1 : MIGRATIONS NEON
-  #
-  # Applique les fichiers SQL manquants sur la base Neon de production,
-  # dans l'ordre de numérotation, avant que Render ne redémarre le service.
-  #
-  # Neon supporte le protocole PostgreSQL standard : psql fonctionne
-  # directement avec la connection string fournie sans dépendance spécifique.
-  #
-  # Ordre d'application :
-  #   1. init-postgres.sql                  -- idempotent (IF NOT EXISTS partout)
-  #   2. 002_production_optimizations.sql   -- idempotent (CREATE INDEX CONCURRENTLY IF NOT EXISTS)
-  #
-  # Si un fichier SQL échoue, le job s'arrête et le déploiement n'est pas déclenché.
-  # Render ne reçoit jamais un deploy hook si la migration est en erreur.
-  # ---------------------------------------------------------------------------
-  migrate:
-    name: Migrations Neon
+  notice:
+    name: Workflow obsolète
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # Installation du client psql via le paquet postgresql-client.
-      # Utilise PostgreSQL 15 pour rester aligné avec l'image de production.
-      - name: Installation du client psql
+      - name: Redirection vers les CD par service
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql-client
-
-      # Vérification de la connexion avant d'appliquer quoi que ce soit.
-      # Détecte rapidement une erreur de secret ou une indisponibilité Neon.
-      - name: Vérification de la connexion Neon
-        run: psql "${{ secrets.NEON_DATABASE_URL }}" -c "SELECT version();"
-
-      # init-postgres.sql est idempotent grâce aux clauses IF NOT EXISTS
-      # et ON CONFLICT DO NOTHING sur les données de seed.
-      # Sans risque d'appliquer deux fois sur une base existante.
-      # - name: Migration 001 -- schéma initial
-      #   run: psql "${{ secrets.NEON_DATABASE_URL }}" -f init-postgres.sql
-
-      # 002 est idempotent grâce à CREATE INDEX CONCURRENTLY IF NOT EXISTS
-      # et CREATE TABLE IF NOT EXISTS sur toutes ses créations.
-      # - name: Migration 002 -- optimisations production
-      #   run: psql "${{ secrets.NEON_DATABASE_URL }}" -f migrations/002_production_optimizations.sql
-      - name: Migrations terminées
-        run: echo "Aucune migration en attente pour ce déploiement."
-
-  # ---------------------------------------------------------------------------
-  # JOB 2 : DEPLOIEMENT RENDER
-  #
-  # Appelle le deploy hook Render après la réussite des migrations.
-  # Render récupère le dernier commit de main, rebuild l'image Docker
-  # depuis docker/Dockerfile, et redémarre le service automatiquement.
-  #
-  # Le deploy hook est une URL HTTPS unique générée par Render.
-  # Elle ne nécessite aucune authentification supplémentaire -- la garder secrète.
-  #
-  #   Render Dashboard > Web Service > Settings > Deploy Hook > Create
-  # ---------------------------------------------------------------------------
-  deploy:
-    name: Déploiement Render
-    runs-on: ubuntu-latest
-    needs: migrate
-    environment: production
-
-    steps:
-      - name: Déclenchement du deploy hook Render
-        run: |
-          HTTP_STATUS=$(curl \
-            --silent \
-            --output /dev/null \
-            --write-out "%{http_code}" \
-            --request POST \
-            "${{ secrets.RENDER_DEPLOY_HOOK_URL }}")
-
-          echo "Statut HTTP retourné par Render : $HTTP_STATUS"
-
-          # Render retourne 201 Created lorsque le déploiement est bien enregistré.
-          # Tout autre code est considéré comme une erreur.
-          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ] && [ "$HTTP_STATUS" != "202" ]; then
-            echo "Erreur : Render n'a pas accepté le deploy hook (HTTP $HTTP_STATUS)"
-            exit 1
-          fi
-
-          echo "Déploiement déclenché avec succès. Suivre l'avancement sur le dashboard Render."
-
-      # Attend que le service Render soit opérationnel en interrogeant
-      # l'endpoint /health toutes les 15 secondes pendant 5 minutes maximum.
-      - name: Attente de la disponibilité de l'API
-        run: |
-          SERVICE_URL="https://ecom-watch.onrender.com"
-          MAX_ATTEMPTS=20
-          WAIT_SECONDS=15
-
-          echo "Vérification de $SERVICE_URL/health (max ${MAX_ATTEMPTS} tentatives)"
-
-          for i in $(seq 1 $MAX_ATTEMPTS); do
-            HTTP_STATUS=$(curl \
-              --silent \
-              --output /dev/null \
-              --write-out "%{http_code}" \
-              --max-time 10 \
-              "$SERVICE_URL/health" || echo "000")
-
-            if [ "$HTTP_STATUS" = "200" ]; then
-              echo "API operationnelle apres $i tentative(s) -- HTTP $HTTP_STATUS"
-              exit 0
-            fi
-
-            echo "Tentative $i/$MAX_ATTEMPTS -- HTTP ${HTTP_STATUS} -- prochaine dans ${WAIT_SECONDS}s"
-            sleep $WAIT_SECONDS
-          done
-
-          echo "Echec : l'API ne repond pas apres $((MAX_ATTEMPTS * WAIT_SECONDS)) secondes"
-          exit 1
-
-      # Résumé du déploiement visible dans l'interface GitHub Actions.
-      - name: Résumé du déploiement
-        if: success()
-        run: |
-          echo "### Déploiement réussi" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Champ       | Valeur |" >> $GITHUB_STEP_SUMMARY
-          echo "|-------------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Commit      | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Auteur      | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Branche     | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Déclenché   | ${{ github.event.head_commit.message }} |" >> $GITHUB_STEP_SUMMARY
+          echo "Ce workflow CD racine est obsolète depuis la migration microservices."
+          echo ""
+          echo "Les déploiements sont désormais gérés par service :"
+          echo "  • Gateway    → gateway/.github/workflows/cd-gateway.yaml"
+          echo "  • Auth       → services/auth/.github/workflows/CD.yaml"
+          echo "  • Order      → services/order/.github/workflows/cd.yaml"
+          echo "  • Products   → services/products/.github/workflows/CD.yaml"
+          echo "  • Payment    → services/payment/.github/workflows/CD.yaml"
+          echo "  • Notif.     → services/notification/.github/workflows/CD.yaml"
+          echo "  • Cart       → services/cart/.github/workflows/CD.yaml"
+          echo "  • Admin      → services/admin/.github/workflows/CD-admin.yaml"
+          echo ""
+          echo "Chaque CD se déclenche automatiquement sur push dans main"
+          echo "quand des fichiers du service correspondant sont modifiés."

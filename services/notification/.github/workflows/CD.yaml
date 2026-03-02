@@ -9,9 +9,9 @@
 #   - Vérifie le /health après déploiement (Redis + PostgreSQL)
 #   - Résumé GitHub Actions
 #
-# PRÉREQUIS — Secrets GitHub :
+# PRÉREQUIS — Secrets GitHub à créer :
 #   RENDER_NOTIFICATION_DEPLOY_HOOK → URL du deploy hook Render du notification-service
-#   (Render dashboard → notification-service → Settings → Deploy Hook)
+#   (Render dashboard → notification-service → Settings → Deploy Hook → Copy URL)
 # ================================================================
 
 name: CD — Notification Service
@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # Attend que le CI (test + build) soit passé sur ce SHA avant de déployer.
-      # Évite de déployer un service avec des tests en échec.
+      # Évite de déployer un service dont le build Docker aurait échoué.
       - name: Wait for CI to complete
         uses: lewagon/wait-on-check-action@v1.3.4
         with:
@@ -53,7 +53,7 @@ jobs:
       - name: Trigger Render Deploy Hook
         run: |
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X POST "${{ secrets.NOTIFICATION_DEPLOY_HOOK }}")
+            -X POST "${{ secrets.RENDER_NOTIFICATION_DEPLOY_HOOK }}")
 
           echo "Render responded with HTTP $HTTP_CODE"
 

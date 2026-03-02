@@ -36,7 +36,10 @@ export const protect = (req, res, next) => {
     }
 
     try {
-        const decoded = jwt.verify(token, ENV.jwt.accessSecret);
+        // CORRECTIF BUG 1 : la clé dans environment.js est `accessTokenSecret`, pas `accessSecret`.
+        // ENV.jwt.accessSecret était `undefined` → jwt.verify() lançait une exception
+        // → catch renvoyait systématiquement 401 sur toutes les routes protégées.
+        const decoded = jwt.verify(token, ENV.jwt.accessTokenSecret);
 
         req.user = {
             id: decoded.sub,

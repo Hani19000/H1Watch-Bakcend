@@ -1,136 +1,506 @@
 # =============================================================================
-# WORKFLOW : Déploiement Continu (CD)
+# WORKFLOW : Déploiement Continu — Global (Root CD)
 #
-# Déclenché uniquement sur les pushs vers main, après validation par la CI.
+# Ce workflow remplace l'ancien CD du monolithe, désormais migré en microservices.
+# Il orchestre le déploiement complet de la stack en 3 phases séquentielles :
 #
-# Pipeline :
-#   migrate   -- applique les migrations SQL en attente sur Neon (production)
-#   deploy    -- déclenche le redéploiement du service Render via deploy hook
+#   Phase 1 — Migrations (en parallèle, indépendantes par schéma)
+#     migrate-auth         → schéma auth      (Neon)
+#     migrate-products     → schéma product   (Neon)
+#     migrate-order        → schéma order     (Neon)
+#     migrate-payment      → schéma payment   (Neon)
+#     migrate-cart         → schéma cart      (Neon)
+#     migrate-notification → schéma notif     (Neon)
 #
-# Infrastructure cible :
-#   API        -- Render Web Service (déploiement depuis GitHub, build interne)
-#   Base       -- Neon PostgreSQL (serverless, connection string standard)
-#   Cache      -- Render Redis (ou Upstash, transparent pour ce workflow)
+#   Phase 2 — Services applicatifs (en parallèle, après toutes les migrations)
+#     deploy-auth, deploy-products, deploy-cart, deploy-order,
+#     deploy-payment, deploy-notification, deploy-admin
+#
+#   Phase 3 — Gateway (en dernier, après que les services sont redémarrés)
+#     deploy-gateway       → point d'entrée unique, déployé en dernier
+#     health-check-gateway → valide que la stack complète répond
+#
+# Déclencheur :
+#   Push sur main uniquement.
+#   Tout merge vers main déclenche un déploiement complet.
+#   Si un service n'a pas changé, Render redeploie la même image (aucun impact).
 #
 # Secrets GitHub requis (Settings > Secrets and variables > Actions) :
-#   NEON_DATABASE_URL      -- connection string Neon de production
-#                            (ex: postgresql://user:pass@ep-xxx.neon.tech/dbname?sslmode=require)
-#   RENDER_DEPLOY_HOOK_URL -- URL du deploy hook Render
-#                            (Render dashboard > Service > Settings > Deploy Hook)
+#
+#   — Connexions Neon (migrations)
+#   NEON_AUTH_DATABASE_URL          → postgresql://...@neon.tech/...?sslmode=require
+#   NEON_PRODUCT_DATABASE_URL       → postgresql://...@neon.tech/...?sslmode=require
+#   NEON_ORDER_DATABASE_URL         → postgresql://...@neon.tech/...?sslmode=require
+#   NEON_PAYMENT_DATABASE_URL       → postgresql://...@neon.tech/...?sslmode=require
+#   NEON_CART_DATABASE_URL          → postgresql://...@neon.tech/...?sslmode=require
+#   NEON_NOTIFICATION_DATABASE_URL  → postgresql://...@neon.tech/...?sslmode=require
+#
+#   — Deploy hooks Render (un hook par service)
+#   RENDER_AUTH_DEPLOY_HOOK         → Render > auth-service     > Settings > Deploy Hook
+#   RENDER_PRODUCT_DEPLOY_HOOK      → Render > product-service  > Settings > Deploy Hook
+#   RENDER_CART_DEPLOY_HOOK         → Render > cart-service     > Settings > Deploy Hook
+#   RENDER_ORDER_DEPLOY_HOOK        → Render > order-service    > Settings > Deploy Hook
+#   RENDER_PAYMENT_DEPLOY_HOOK      → Render > payment-service  > Settings > Deploy Hook
+#   RENDER_NOTIFICATION_DEPLOY_HOOK → Render > notification-service > Settings > Deploy Hook
+#   RENDER_ADMIN_DEPLOY_HOOK_URL    → Render > admin-service    > Settings > Deploy Hook
+#   RENDER_GATEWAY_DEPLOY_HOOK      → Render > gateway          > Settings > Deploy Hook
+#
+#   — URL publique du Gateway (health check final)
+#   RENDER_GATEWAY_URL              → https://ecom-watch-gateway.onrender.com
 # =============================================================================
 
-name: CD
+name: CD — Global
 
 on:
   push:
     branches:
       - main
 
-# Un seul déploiement à la fois.
-# On ne cancel pas pour éviter de laisser la base dans un état intermédiaire.
+# Un seul déploiement global à la fois.
+# cancel-in-progress: false — on ne coupe jamais un déploiement en cours
+# pour éviter de laisser des schémas dans un état intermédiaire.
 concurrency:
-  group: cd-production
+  group: cd-global-production
   cancel-in-progress: false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 1 — MIGRATIONS
+# Chaque job de migration est indépendant (schémas distincts).
+# Ils s'exécutent en parallèle pour minimiser le temps de déploiement.
+# Si l'une échoue, la Phase 2 n'est pas déclenchée.
+# ─────────────────────────────────────────────────────────────────────────────
 
 jobs:
 
   # ---------------------------------------------------------------------------
-  # JOB 1 : MIGRATIONS NEON
-  #
-  # Applique les fichiers SQL manquants sur la base Neon de production,
-  # dans l'ordre de numérotation, avant que Render ne redémarre le service.
-  #
-  # Neon supporte le protocole PostgreSQL standard : psql fonctionne
-  # directement avec la connection string fournie sans dépendance spécifique.
-  #
-  # Ordre d'application :
-  #   1. init-postgres.sql                  -- idempotent (IF NOT EXISTS partout)
-  #   2. 002_production_optimizations.sql   -- idempotent (CREATE INDEX CONCURRENTLY IF NOT EXISTS)
-  #
-  # Si un fichier SQL échoue, le job s'arrête et le déploiement n'est pas déclenché.
-  # Render ne reçoit jamais un deploy hook si la migration est en erreur.
+  # AUTH — Migration du schéma auth
+  # Tables : users, roles, user_roles, refresh_tokens, password_reset_tokens
   # ---------------------------------------------------------------------------
-  migrate:
-    name: Migrations Neon
+  migrate-auth:
+    name: "[Migration] auth"
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Installation du client psql via le paquet postgresql-client.
-      # Utilise PostgreSQL 15 pour rester aligné avec l'image de production.
-      - name: Installation du client psql
+      - name: Installation psql
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-client
 
-      # Vérification de la connexion avant d'appliquer quoi que ce soit.
-      # Détecte rapidement une erreur de secret ou une indisponibilité Neon.
-      - name: Vérification de la connexion Neon
-        run: psql "${{ secrets.NEON_DATABASE_URL }}" -c "SELECT version();"
+      - name: Vérification connexion Neon
+        run: psql "${{ secrets.NEON_AUTH_DATABASE_URL }}" -c "SELECT 1;" -q
 
-      # init-postgres.sql est idempotent grâce aux clauses IF NOT EXISTS
-      # et ON CONFLICT DO NOTHING sur les données de seed.
-      # Sans risque d'appliquer deux fois sur une base existante.
-      # - name: Migration 001 -- schéma initial
-      #   run: psql "${{ secrets.NEON_DATABASE_URL }}" -f init-postgres.sql
+      - name: Migration 001 — schéma auth
+        run: |
+          psql "${{ secrets.NEON_AUTH_DATABASE_URL }}" \
+            -v ON_ERROR_STOP=1 \
+            -f services/auth/migrations/001_auth_shema.sql
+          echo "Migration 001 auth OK"
 
-      # 002 est idempotent grâce à CREATE INDEX CONCURRENTLY IF NOT EXISTS
-      # et CREATE TABLE IF NOT EXISTS sur toutes ses créations.
-      # - name: Migration 002 -- optimisations production
-      #   run: psql "${{ secrets.NEON_DATABASE_URL }}" -f migrations/002_production_optimizations.sql
-      - name: Migrations terminées
-        run: echo "Aucune migration en attente pour ce déploiement."
+      - name: Migration 002 — index auth
+        run: |
+          psql "${{ secrets.NEON_AUTH_DATABASE_URL }}" \
+            -v ON_ERROR_STOP=1 \
+            -f services/auth/migrations/002_auth_indexes.sql
+          echo "Migration 002 auth OK"
 
   # ---------------------------------------------------------------------------
-  # JOB 2 : DEPLOIEMENT RENDER
-  #
-  # Appelle le deploy hook Render après la réussite des migrations.
-  # Render récupère le dernier commit de main, rebuild l'image Docker
-  # depuis docker/Dockerfile, et redémarre le service automatiquement.
-  #
-  # Le deploy hook est une URL HTTPS unique générée par Render.
-  # Elle ne nécessite aucune authentification supplémentaire -- la garder secrète.
-  #
-  #   Render Dashboard > Web Service > Settings > Deploy Hook > Create
+  # PRODUCTS — Migration du schéma product
+  # Tables : products, product_variants, categories, inventory, promotions...
   # ---------------------------------------------------------------------------
-  deploy:
-    name: Déploiement Render
+  migrate-products:
+    name: "[Migration] products"
     runs-on: ubuntu-latest
-    needs: migrate
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Installation psql
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+
+      - name: Vérification connexion Neon
+        run: psql "${{ secrets.NEON_PRODUCT_DATABASE_URL }}" -c "SELECT 1;" -q
+
+      - name: Migration 001 — schéma product
+        run: |
+          psql "${{ secrets.NEON_PRODUCT_DATABASE_URL }}" \
+            -v ON_ERROR_STOP=1 \
+            -f services/products/migrations/001_product_schema.sql
+          echo "Migration 001 products OK"
+
+      - name: Migration 002 — index product
+        run: |
+          psql "${{ secrets.NEON_PRODUCT_DATABASE_URL }}" \
+            -v ON_ERROR_STOP=1 \
+            -f services/products/migrations/002_product_indexes.sql
+          echo "Migration 002 products OK"
+
+  # ---------------------------------------------------------------------------
+  # ORDER — Migration du schéma order
+  # Tables : orders, order_items, shipments, shipping_addresses
+  # ---------------------------------------------------------------------------
+  migrate-order:
+    name: "[Migration] order"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Installation psql
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+
+      - name: Vérification connexion Neon
+        run: psql "${{ secrets.NEON_ORDER_DATABASE_URL }}" -c "SELECT 1;" -q
+
+      - name: Migration 001 — schéma order
+        run: |
+          psql "${{ secrets.NEON_ORDER_DATABASE_URL }}" \
+            -v ON_ERROR_STOP=1 \
+            -f services/order/migrations/001_order_schema.sql
+          echo "Migration 001 order OK"
+
+      - name: Migration 002 — index et fonction cleanup
+        run: |
+          psql "${{ secrets.NEON_ORDER_DATABASE_URL }}" \
+            -v ON_ERROR_STOP=1 \
+            -f services/order/migrations/002_order_indexes.sql
+          echo "Migration 002 order OK"
+
+  # ---------------------------------------------------------------------------
+  # PAYMENT — Migration du schéma payment
+  # Tables : payments (Stripe sessions, statuts, idempotence)
+  # ---------------------------------------------------------------------------
+  migrate-payment:
+    name: "[Migration] payment"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Installation psql
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+
+      - name: Vérification connexion Neon
+        run: psql "${{ secrets.NEON_PAYMENT_DATABASE_URL }}" -c "SELECT 1;" -q
+
+      - name: Migration 001 — schéma payment
+        run: |
+          psql "${{ secrets.NEON_PAYMENT_DATABASE_URL }}" \
+            -v ON_ERROR_STOP=1 \
+            -f services/payment/migrations/001_payment_schema.sql
+          echo "Migration 001 payment OK"
+
+      - name: Migration 002 — index payment
+        run: |
+          psql "${{ secrets.NEON_PAYMENT_DATABASE_URL }}" \
+            -v ON_ERROR_STOP=1 \
+            -f services/payment/migrations/002_payment_indexes.sql
+          echo "Migration 002 payment OK"
+
+  # ---------------------------------------------------------------------------
+  # CART — Migration du schéma cart
+  # Script : 000_neon_add_cart.sql (unique, idempotent)
+  # ---------------------------------------------------------------------------
+  migrate-cart:
+    name: "[Migration] cart"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Installation psql
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+
+      - name: Vérification connexion Neon
+        run: psql "${{ secrets.NEON_CART_DATABASE_URL }}" -c "SELECT 1;" -q
+
+      - name: Migration 000 — schéma cart
+        run: |
+          psql "${{ secrets.NEON_CART_DATABASE_URL }}" \
+            -v ON_ERROR_STOP=1 \
+            -f services/cart/migrations/000_neon_add_cart.sql
+          echo "Migration 000 cart OK"
+
+  # ---------------------------------------------------------------------------
+  # NOTIFICATION — Migration du schéma notification
+  # Scripts : 000_neon_add_notification.sql → 001_schema → 002_indexes
+  # ---------------------------------------------------------------------------
+  migrate-notification:
+    name: "[Migration] notification"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Installation psql
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+
+      - name: Vérification connexion Neon
+        run: psql "${{ secrets.NEON_NOTIFICATION_DATABASE_URL }}" -c "SELECT 1;" -q
+
+      - name: Migration 000 — extension notification
+        run: |
+          psql "${{ secrets.NEON_NOTIFICATION_DATABASE_URL }}" \
+            -v ON_ERROR_STOP=1 \
+            -f services/notification/migrations/000_neon_add_notification.sql
+          echo "Migration 000 notification OK"
+
+      - name: Migration 001 — schéma notification
+        run: |
+          psql "${{ secrets.NEON_NOTIFICATION_DATABASE_URL }}" \
+            -v ON_ERROR_STOP=1 \
+            -f services/notification/migrations/001_notification_schema.sql
+          echo "Migration 001 notification OK"
+
+      - name: Migration 002 — index notification
+        run: |
+          psql "${{ secrets.NEON_NOTIFICATION_DATABASE_URL }}" \
+            -v ON_ERROR_STOP=1 \
+            -f services/notification/migrations/002_notification_indexes.sql
+          echo "Migration 002 notification OK"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 2 — DÉPLOIEMENT DES SERVICES APPLICATIFS
+# Tous les services sont déployés en parallèle après la réussite
+# de l'ensemble des migrations (needs: tous les jobs migrate-*).
+# L'admin-service n'a pas de migration : il est déployé directement ici.
+# ─────────────────────────────────────────────────────────────────────────────
+
+  # ---------------------------------------------------------------------------
+  # Helper réutilisable : déclenche un deploy hook Render et logue le résultat.
+  # Chaque service utilise la même logique curl + vérification HTTP_STATUS.
+  # ---------------------------------------------------------------------------
+
+  deploy-auth:
+    name: "[Deploy] auth-service"
+    runs-on: ubuntu-latest
+    needs:
+      - migrate-auth
+      - migrate-products
+      - migrate-order
+      - migrate-payment
+      - migrate-cart
+      - migrate-notification
     environment: production
 
     steps:
-      - name: Déclenchement du deploy hook Render
+      - name: Trigger Render deploy hook
         run: |
-          HTTP_STATUS=$(curl \
-            --silent \
-            --output /dev/null \
-            --write-out "%{http_code}" \
-            --request POST \
-            "${{ secrets.RENDER_DEPLOY_HOOK_URL }}")
-
-          echo "Statut HTTP retourné par Render : $HTTP_STATUS"
-
-          # Render retourne 201 Created lorsque le déploiement est bien enregistré.
-          # Tout autre code est considéré comme une erreur.
+          HTTP_STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" \
+            --request POST "${{ secrets.RENDER_AUTH_DEPLOY_HOOK }}")
+          echo "Render auth-service → HTTP $HTTP_STATUS"
           if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ] && [ "$HTTP_STATUS" != "202" ]; then
-            echo "Erreur : Render n'a pas accepté le deploy hook (HTTP $HTTP_STATUS)"
+            echo "Erreur : deploy hook auth-service rejeté (HTTP $HTTP_STATUS)"
             exit 1
           fi
+          echo "Deploy auth-service déclenché"
 
-          echo "Déploiement déclenché avec succès. Suivre l'avancement sur le dashboard Render."
+  deploy-products:
+    name: "[Deploy] product-service"
+    runs-on: ubuntu-latest
+    needs:
+      - migrate-auth
+      - migrate-products
+      - migrate-order
+      - migrate-payment
+      - migrate-cart
+      - migrate-notification
+    environment: production
 
-      # Attend que le service Render soit opérationnel en interrogeant
-      # l'endpoint /health toutes les 15 secondes pendant 5 minutes maximum.
-      - name: Attente de la disponibilité de l'API
+    steps:
+      - name: Trigger Render deploy hook
         run: |
-          SERVICE_URL="https://ecom-watch.onrender.com"
-          MAX_ATTEMPTS=20
+          HTTP_STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" \
+            --request POST "${{ secrets.RENDER_PRODUCT_DEPLOY_HOOK }}")
+          echo "Render product-service → HTTP $HTTP_STATUS"
+          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ] && [ "$HTTP_STATUS" != "202" ]; then
+            echo "Erreur : deploy hook product-service rejeté (HTTP $HTTP_STATUS)"
+            exit 1
+          fi
+          echo "Deploy product-service déclenché"
+
+  deploy-cart:
+    name: "[Deploy] cart-service"
+    runs-on: ubuntu-latest
+    needs:
+      - migrate-auth
+      - migrate-products
+      - migrate-order
+      - migrate-payment
+      - migrate-cart
+      - migrate-notification
+    environment: production
+
+    steps:
+      - name: Trigger Render deploy hook
+        run: |
+          HTTP_STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" \
+            --request POST "${{ secrets.RENDER_CART_DEPLOY_HOOK }}")
+          echo "Render cart-service → HTTP $HTTP_STATUS"
+          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ] && [ "$HTTP_STATUS" != "202" ]; then
+            echo "Erreur : deploy hook cart-service rejeté (HTTP $HTTP_STATUS)"
+            exit 1
+          fi
+          echo "Deploy cart-service déclenché"
+
+  deploy-order:
+    name: "[Deploy] order-service"
+    runs-on: ubuntu-latest
+    needs:
+      - migrate-auth
+      - migrate-products
+      - migrate-order
+      - migrate-payment
+      - migrate-cart
+      - migrate-notification
+    environment: production
+
+    steps:
+      - name: Trigger Render deploy hook
+        run: |
+          HTTP_STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" \
+            --request POST "${{ secrets.RENDER_ORDER_DEPLOY_HOOK }}")
+          echo "Render order-service → HTTP $HTTP_STATUS"
+          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ] && [ "$HTTP_STATUS" != "202" ]; then
+            echo "Erreur : deploy hook order-service rejeté (HTTP $HTTP_STATUS)"
+            exit 1
+          fi
+          echo "Deploy order-service déclenché"
+
+  deploy-payment:
+    name: "[Deploy] payment-service"
+    runs-on: ubuntu-latest
+    needs:
+      - migrate-auth
+      - migrate-products
+      - migrate-order
+      - migrate-payment
+      - migrate-cart
+      - migrate-notification
+    environment: production
+
+    steps:
+      - name: Trigger Render deploy hook
+        run: |
+          HTTP_STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" \
+            --request POST "${{ secrets.RENDER_PAYMENT_DEPLOY_HOOK }}")
+          echo "Render payment-service → HTTP $HTTP_STATUS"
+          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ] && [ "$HTTP_STATUS" != "202" ]; then
+            echo "Erreur : deploy hook payment-service rejeté (HTTP $HTTP_STATUS)"
+            exit 1
+          fi
+          echo "Deploy payment-service déclenché"
+
+  deploy-notification:
+    name: "[Deploy] notification-service"
+    runs-on: ubuntu-latest
+    needs:
+      - migrate-auth
+      - migrate-products
+      - migrate-order
+      - migrate-payment
+      - migrate-cart
+      - migrate-notification
+    environment: production
+
+    steps:
+      - name: Trigger Render deploy hook
+        run: |
+          HTTP_STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" \
+            --request POST "${{ secrets.RENDER_NOTIFICATION_DEPLOY_HOOK }}")
+          echo "Render notification-service → HTTP $HTTP_STATUS"
+          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ] && [ "$HTTP_STATUS" != "202" ]; then
+            echo "Erreur : deploy hook notification-service rejeté (HTTP $HTTP_STATUS)"
+            exit 1
+          fi
+          echo "Deploy notification-service déclenché"
+
+  deploy-admin:
+    name: "[Deploy] admin-service"
+    runs-on: ubuntu-latest
+    # Pas de migration pour l'admin-service (agrégateur HTTP sans DB propre)
+    # Il attend quand même les migrations pour s'assurer que les services
+    # qu'il agrège ont leur schéma à jour.
+    needs:
+      - migrate-auth
+      - migrate-products
+      - migrate-order
+      - migrate-payment
+      - migrate-cart
+      - migrate-notification
+    environment: production
+
+    steps:
+      - name: Trigger Render deploy hook
+        run: |
+          HTTP_STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" \
+            --request POST "${{ secrets.RENDER_ADMIN_DEPLOY_HOOK_URL }}")
+          echo "Render admin-service → HTTP $HTTP_STATUS"
+          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ] && [ "$HTTP_STATUS" != "202" ]; then
+            echo "Erreur : deploy hook admin-service rejeté (HTTP $HTTP_STATUS)"
+            exit 1
+          fi
+          echo "Deploy admin-service déclenché"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 3 — GATEWAY + HEALTH CHECK FINAL
+# Le Gateway est déployé en dernier car il route vers les services.
+# Le déployer avant que les services soient redémarrés risquerait de router
+# vers des instances en cours de restart.
+# ─────────────────────────────────────────────────────────────────────────────
+
+  deploy-gateway:
+    name: "[Deploy] gateway"
+    runs-on: ubuntu-latest
+    needs:
+      - deploy-auth
+      - deploy-products
+      - deploy-cart
+      - deploy-order
+      - deploy-payment
+      - deploy-notification
+      - deploy-admin
+    environment: production
+
+    steps:
+      - name: Trigger Render deploy hook
+        run: |
+          HTTP_STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" \
+            --request POST "${{ secrets.RENDER_GATEWAY_DEPLOY_HOOK }}")
+          echo "Render gateway → HTTP $HTTP_STATUS"
+          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ] && [ "$HTTP_STATUS" != "202" ]; then
+            echo "Erreur : deploy hook gateway rejeté (HTTP $HTTP_STATUS)"
+            exit 1
+          fi
+          echo "Deploy gateway déclenché"
+
+      # Attend que le Gateway réponde sur /health.
+      # Render peut prendre jusqu'à 3-5 minutes sur plan gratuit (cold start).
+      # MAX_ATTEMPTS=24 × WAIT_SECONDS=15 = 6 minutes de polling max.
+      - name: Health check Gateway
+        run: |
+          GATEWAY_URL="${{ secrets.RENDER_GATEWAY_URL }}"
+          MAX_ATTEMPTS=24
           WAIT_SECONDS=15
 
-          echo "Vérification de $SERVICE_URL/health (max ${MAX_ATTEMPTS} tentatives)"
+          echo "Polling $GATEWAY_URL/health (max ${MAX_ATTEMPTS} × ${WAIT_SECONDS}s)"
 
           for i in $(seq 1 $MAX_ATTEMPTS); do
             HTTP_STATUS=$(curl \
@@ -138,29 +508,50 @@ jobs:
               --output /dev/null \
               --write-out "%{http_code}" \
               --max-time 10 \
-              "$SERVICE_URL/health" || echo "000")
+              "$GATEWAY_URL/health" || echo "000")
 
             if [ "$HTTP_STATUS" = "200" ]; then
-              echo "API operationnelle apres $i tentative(s) -- HTTP $HTTP_STATUS"
+              echo "Gateway opérationnel après $i tentative(s) — HTTP $HTTP_STATUS"
               exit 0
             fi
 
-            echo "Tentative $i/$MAX_ATTEMPTS -- HTTP ${HTTP_STATUS} -- prochaine dans ${WAIT_SECONDS}s"
+            echo "Tentative $i/$MAX_ATTEMPTS — HTTP ${HTTP_STATUS} — prochaine dans ${WAIT_SECONDS}s"
             sleep $WAIT_SECONDS
           done
 
-          echo "Echec : l'API ne repond pas apres $((MAX_ATTEMPTS * WAIT_SECONDS)) secondes"
+          echo "Timeout : Gateway ne répond pas après $((MAX_ATTEMPTS * WAIT_SECONDS))s"
           exit 1
 
-      # Résumé du déploiement visible dans l'interface GitHub Actions.
       - name: Résumé du déploiement
         if: success()
         run: |
-          echo "### Déploiement réussi" >> $GITHUB_STEP_SUMMARY
+          echo "### ✅ Déploiement global réussi" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Champ       | Valeur |" >> $GITHUB_STEP_SUMMARY
-          echo "|-------------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Commit      | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Auteur      | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Branche     | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Déclenché   | ${{ github.event.head_commit.message }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Service             | Statut |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------------------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| auth-service        | ✅ déployé |" >> $GITHUB_STEP_SUMMARY
+          echo "| product-service     | ✅ déployé |" >> $GITHUB_STEP_SUMMARY
+          echo "| cart-service        | ✅ déployé |" >> $GITHUB_STEP_SUMMARY
+          echo "| order-service       | ✅ déployé |" >> $GITHUB_STEP_SUMMARY
+          echo "| payment-service     | ✅ déployé |" >> $GITHUB_STEP_SUMMARY
+          echo "| notification-service| ✅ déployé |" >> $GITHUB_STEP_SUMMARY
+          echo "| admin-service       | ✅ déployé |" >> $GITHUB_STEP_SUMMARY
+          echo "| gateway             | ✅ déployé |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Champ     | Valeur |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit    | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Auteur    | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branche   | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Message   | ${{ github.event.head_commit.message }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Gateway   | ${{ secrets.RENDER_GATEWAY_URL }}/health |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Résumé en cas d'échec
+        if: failure()
+        run: |
+          echo "### ❌ Déploiement global échoué" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Vérifier les jobs en erreur ci-dessus et consulter les logs Render." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit  | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Auteur  | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY

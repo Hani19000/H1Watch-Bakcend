@@ -15,6 +15,7 @@
 #
 # SERVICES ROUTÉS :
 #   auth, order, product, payment, cart → routes publiques exposées
+#   admin                               → routes /api/v1/admin/* exposées (ajouté)
 #   notification                        → aucune route publique (interne uniquement)
 # ================================================================
 
@@ -48,6 +49,9 @@ jobs:
   #   - Une variable manquante dans envsubst (upstream vide → emerg)
   #   - Une faute de syntaxe Nginx
   #   - Un bloc location mal formé
+  #
+  # MAINTENANCE : Toute variable ajoutée dans nginx.conf ou default.conf DOIT
+  # être ajoutée ici ET dans entrypoint.sh. Le grep final détecte les oublis.
   # ────────────────────────────────────────────────────────────────────────────
 
   validate:
@@ -62,28 +66,42 @@ jobs:
           docker run --rm \
             -v ${{ github.workspace }}/gateway/nginx:/etc/nginx/src:ro \
             -e PORT=8080 \
+            -e MONOLITH_URL=ecom-watch.onrender.com \
+            -e FRONTEND_DOMAIN=ecomwatch.vercel.app \
             -e AUTH_SERVICE_HOST=ecom-watch-auth.onrender.com \
             -e ORDER_SERVICE_HOST=ecom-watch-order.onrender.com \
             -e PRODUCT_SERVICE_HOST=ecom-watch-product.onrender.com \
             -e PAYMENT_SERVICE_HOST=ecom-watch-payment.onrender.com \
             -e CART_SERVICE_HOST=ecom-watch-cart.onrender.com \
             -e NOTIFICATION_SERVICE_HOST=ecom-watch-notification.onrender.com \
-            -e FRONTEND_DOMAIN=ecomwatch.vercel.app \
+            -e ADMIN_SERVICE_HOST=ecom-watch-admin.onrender.com \
             nginx:1.25-alpine sh -c '
               set -e
 
               mkdir -p /tmp/nginx/conf.d
 
+              # Liste complète des variables substituées — doit rester synchronisée
+              # avec entrypoint.sh. Le grep final détecte tout oubli.
+              VARS="${PORT} ${MONOLITH_URL} ${FRONTEND_DOMAIN} ${AUTH_SERVICE_HOST} ${ORDER_SERVICE_HOST} ${PRODUCT_SERVICE_HOST} ${PAYMENT_SERVICE_HOST} ${CART_SERVICE_HOST} ${NOTIFICATION_SERVICE_HOST} ${ADMIN_SERVICE_HOST}"
+
+              # Simulation exacte de entrypoint.sh
+              envsubst "$VARS" \
+                < /etc/nginx/src/nginx.conf > /tmp/nginx/nginx.conf
+
+              envsubst "$VARS" \
+                < /etc/nginx/src/conf.d/default.conf > /tmp/nginx/conf.d/default.conf
+
               cp /etc/nginx/src/conf.d/proxy_params.conf /tmp/nginx/conf.d/proxy_params.conf
 
-              # Vérifie qu il ne reste aucune variable non substituée
-              if grep -r "\${" /tmp/nginx/; then
+              # Vérifie qu'il ne reste aucune variable non substituée (oubli dans VARS)
+              if grep -rE "\$\{[A-Z_]+\}" /tmp/nginx/; then
                 echo "ERREUR : des variables non substituées sont présentes dans la config"
+                echo "Ajouter la variable manquante dans VARS ci-dessus ET dans entrypoint.sh"
                 exit 1
               fi
 
               nginx -t -c /tmp/nginx/nginx.conf
-              echo "Config Nginx valide"
+              echo "Config Nginx valide — tous les upstreams sont résolus"
             '
 
   # ────────────────────────────────────────────────────────────────────────────

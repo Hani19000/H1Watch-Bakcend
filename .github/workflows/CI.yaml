@@ -1,189 +1,141 @@
 # =============================================================================
-# WORKFLOW : Intégration Continue (CI)
+# WORKFLOW : Intégration Continue — Globale (Root CI)
 #
-# Déclenché sur chaque push et pull request vers main et develop.
+# Ce workflow remplace l'ancien CI du monolithe, désormais migré en microservices.
+# Chaque service dispose de son propre CI dans services/<service>/.github/workflows/.
+# Ce workflow root couvre les vérifications transversales qu'aucun CI de service
+# ne peut faire seul.
 #
 # Pipeline :
-#   lint   -- vérification statique ESLint
-#   test   -- tests d'intégration avec PostgreSQL 15 et Redis 7 en services locaux
+#   validate-gateway  — valide la config Nginx avec toutes les variables
+#                       de tous les services (y compris admin-service)
+#   validate-compose  — vérifie que docker-compose.yml est syntaxiquement valide
 #
-# Note : le job "build Docker" du monolith a été supprimé.
-# Le monolith est entièrement migré en microservices — docker/Dockerfile n'est
-# plus utilisé en production. Chaque service microservice dispose de son propre
-# Dockerfile dans services/<service>/Dockerfile, déployé directement par Render.
+# Déclencheurs :
+#   Tout push/PR sur main ou develop, sur les fichiers cross-cutting :
+#     - gateway/**       → config Nginx impacte tous les services
+#     - docker-compose.yml
+#     - .github/workflows/CI.yaml (ce fichier)
+#
+# Les CIs individuels (ci-auth.yaml, ci-product.yaml, etc.) continuent
+# de s'exécuter sur leurs paths respectifs de façon indépendante.
 # =============================================================================
 
-name: CI
+name: CI — Global
 
 on:
   push:
     branches:
       - main
       - develop
+    paths:
+      - "gateway/**"
+      - "docker-compose.yml"
+      - ".github/workflows/CI.yaml"
   pull_request:
     branches:
       - main
       - develop
+    paths:
+      - "gateway/**"
+      - "docker-compose.yml"
+      - ".github/workflows/CI.yaml"
 
 # Annule les runs en cours si un nouveau commit arrive sur la même branche.
-# Evite de consommer des minutes de CI sur du code déjà remplacé.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-global-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
 
   # ---------------------------------------------------------------------------
-  # JOB 1 : LINT
-  # Vérification statique rapide, sans service externe.
+  # JOB 1 : VALIDATION DE LA CONFIG NGINX (GATEWAY)
+  #
+  # Simule exactement ce que fait entrypoint.sh en production :
+  #   1. envsubst remplace TOUTES les variables connues avec des valeurs fictives
+  #   2. nginx -t valide la syntaxe et les upstreams
+  #
+  # IMPORTANT : Cette liste de variables DOIT être maintenue à jour à chaque
+  # ajout d'un nouveau service routé par le Gateway.
+  #
+  # Services actuellement routés :
+  #   auth, order, product, payment, cart  → routes publiques exposées
+  #   admin                                → routes /api/v1/admin/* (ajouté)
+  #   notification                         → aucune route publique (interne)
   # ---------------------------------------------------------------------------
-  lint:
-    name: Lint
+  validate-gateway:
+    name: Validate Nginx Config (Gateway)
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
+      - name: Validate Nginx config avec envsubst complet
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}/gateway/nginx:/etc/nginx/src:ro \
+            -e PORT=8080 \
+            -e MONOLITH_URL=ecom-watch.onrender.com \
+            -e FRONTEND_DOMAIN=ecomwatch.vercel.app \
+            -e AUTH_SERVICE_HOST=ecom-watch-auth.onrender.com \
+            -e ORDER_SERVICE_HOST=ecom-watch-order.onrender.com \
+            -e PRODUCT_SERVICE_HOST=ecom-watch-product.onrender.com \
+            -e PAYMENT_SERVICE_HOST=ecom-watch-payment.onrender.com \
+            -e CART_SERVICE_HOST=ecom-watch-cart.onrender.com \
+            -e NOTIFICATION_SERVICE_HOST=ecom-watch-notification.onrender.com \
+            -e ADMIN_SERVICE_HOST=ecom-watch-admin.onrender.com \
+            nginx:1.25-alpine sh -c '
+              set -e
 
-      - name: Installation des dépendances
-        run: npm ci
+              mkdir -p /tmp/nginx/conf.d
 
-      - name: ESLint
-        run: npm run lint
+              # Substitution complète de toutes les variables connues
+              VARS="${PORT} ${MONOLITH_URL} ${FRONTEND_DOMAIN} ${AUTH_SERVICE_HOST} ${ORDER_SERVICE_HOST} ${PRODUCT_SERVICE_HOST} ${PAYMENT_SERVICE_HOST} ${CART_SERVICE_HOST} ${NOTIFICATION_SERVICE_HOST} ${ADMIN_SERVICE_HOST}"
 
+              envsubst "$VARS" \
+                < /etc/nginx/src/nginx.conf > /tmp/nginx/nginx.conf
+
+              envsubst "$VARS" \
+                < /etc/nginx/src/conf.d/default.conf > /tmp/nginx/conf.d/default.conf
+
+              cp /etc/nginx/src/conf.d/proxy_params.conf /tmp/nginx/conf.d/proxy_params.conf
+
+              # Détecte les variables non substituées (oubli dans la liste VARS)
+              if grep -rE "\$\{[A-Z_]+\}" /tmp/nginx/; then
+                echo "ERREUR : des variables non substituées dans la config Nginx"
+                echo "Ajouter la variable manquante dans le step ci-dessus ET dans gateway/docker/entrypoint.sh"
+                exit 1
+              fi
+
+              nginx -t -c /tmp/nginx/nginx.conf
+              echo "Config Nginx valide — tous les upstreams sont résolus"
+            '
 
   # ---------------------------------------------------------------------------
-  # JOB 2 : TESTS D'INTEGRATION
+  # JOB 2 : VALIDATION DU DOCKER-COMPOSE
   #
-  # Démarre PostgreSQL 15-alpine et Redis 7-alpine comme services Docker
-  # natifs du runner. Ils sont disponibles sur localhost avant le premier step.
-  #
-  # Le schéma est appliqué manuellement dans l'ordre correct :
-  #   1. init-postgres.sql                   -- schéma, types, triggers, seed
-  #   2. 002_production_optimizations.sql    -- index, vues, fonctions, password_history
+  # Vérifie que docker-compose.yml est syntaxiquement valide.
+  # Utile pour le développement local : évite de pousser un compose cassé.
   # ---------------------------------------------------------------------------
-  test:
-    name: Tests d'intégration
+  validate-compose:
+    name: Validate docker-compose.yml
     runs-on: ubuntu-latest
 
-    services:
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      postgres:
-        image: postgres:15-alpine
+      - name: Validate docker-compose syntax
+        run: docker compose config --quiet
         env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: ecom_watch_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d ecom_watch_test"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-    # Variables consommées par environment.js (validation fail-fast au démarrage).
-    # Les valeurs sensibles sont fictives -- elles n'ont aucun impact hors des tests.
-    env:
-      NODE_ENV: test
-
-      # Base de données locale du runner
-      POSTGRES_HOST: localhost
-      POSTGRES_PORT: 5432
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: ecom_watch_test
-
-      # Redis local du runner
-      REDIS_HOST: localhost
-      REDIS_PORT: 6379
-
-      # JWT -- valeurs de test uniquement, jamais utilisées en production
-      JWT_ACCESS_SECRET: ci-access-secret-not-for-production
-      JWT_REFRESH_SECRET: ci-refresh-secret-not-for-production
-      JWT_ACCESS_EXPIRES_IN: 15m
-      JWT_REFRESH_EXPIRES_IN: 7d
-
-      # Stripe -- clé test sans impact financier
-      STRIPE_SECRET_KEY: sk_test_placeholder
-      STRIPE_WEBHOOK_SECRET: whsec_placeholder
-
-      # Cloudinary -- désactivé en test
-      CLOUDINARY_CLOUD_NAME: test
-      CLOUDINARY_API_KEY: test
-      CLOUDINARY_API_SECRET: test
-
-      # Email Resend -- désactivé en test
-      RESEND_API_KEY: re_test_placeholder
-      EMAIL_FROM: noreply@ecom-watch.local
-
-      # Application
-      CLIENT_URL: http://localhost:3000
-      PORT: 3001
-
-      # Sentry -- valeur fictive pour passer la validation
-      SENTRY_DSN: https://public@sentry.example.com/1
-
-      # Inter-services -- order-service
-      ORDER_SERVICE_URL: http://localhost:3004
-      INTERNAL_ORDER_SECRET: ci-order-secret-not-for-production
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - name: Installation des dépendances
-        run: npm ci
-
-      # Applique le schéma complet : tables, enums, triggers, données de test.
-      - name: Initialisation du schéma
-        run: |
-          PGPASSWORD=postgres psql \
-            -h localhost \
-            -U postgres \
-            -d ecom_watch_test \
-            -f init-postgres.sql
-
-      # Applique les optimisations : index, vues matérialisées, fonctions
-      # d'archivage, password_history et password_reset_tokens.
-      - name: Application de la migration 002
-        run: |
-          PGPASSWORD=postgres psql \
-            -h localhost \
-            -U postgres \
-            -d ecom_watch_test \
-            -f migrations/002_production_optimizations.sql
-
-      - name: Exécution des tests
-        run: npm test
-
-      # Upload du rapport de couverture. Non bloquant si CODECOV_TOKEN est absent.
-      - name: Upload couverture Codecov
-        uses: codecov/codecov-action@v4
-        if: always()
-        continue-on-error: true
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+          # Variables requises par docker-compose.yml pour la validation à sec
+          # (valeurs fictives — aucun container n'est démarré ici)
+          POSTGRES_USER: ci_user
+          POSTGRES_PASSWORD: ci_password
+          POSTGRES_DB: ci_db
+          JWT_ACCESS_SECRET: ci-secret
+          JWT_REFRESH_SECRET: ci-secret
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379
+          CLIENT_URL: http://localhost:5173

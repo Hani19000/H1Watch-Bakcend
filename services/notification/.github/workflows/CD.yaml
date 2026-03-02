@@ -1,0 +1,105 @@
+# ================================================================
+# CD — Notification Service
+#
+# Déploie le notification-service sur Render via Deploy Hook sur merge main.
+#
+# COHÉRENCE :
+#   Même structure que cd-auth, cd-order, cd-product, cd-payment.
+#   - Attend la fin du CI avant de déployer
+#   - Vérifie le /health après déploiement (Redis + PostgreSQL)
+#   - Résumé GitHub Actions
+#
+# PRÉREQUIS — Secrets GitHub :
+#   RENDER_NOTIFICATION_DEPLOY_HOOK → URL du deploy hook Render du notification-service
+#   (Render dashboard → notification-service → Settings → Deploy Hook)
+# ================================================================
+
+name: CD — Notification Service
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/notification/**"
+
+# Un seul déploiement à la fois — évite les race conditions sur Render.
+concurrency:
+  group: cd-notification-production
+  cancel-in-progress: false
+
+jobs:
+
+  deploy:
+    name: Deploy Notification Service → Render
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Attend que le CI (test + build) soit passé sur ce SHA avant de déployer.
+      # Évite de déployer un service avec des tests en échec.
+      - name: Wait for CI to complete
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          check-name: "Build Docker Image"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 15
+          allowed-conclusions: success
+
+      # Déclenche le redéploiement Render.
+      # Render rebuild l'image depuis le Dockerfile et redémarre le container.
+      - name: Trigger Render Deploy Hook
+        run: |
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${{ secrets.RENDER_NOTIFICATION_DEPLOY_HOOK }}")
+
+          echo "Render responded with HTTP $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
+            echo "Deploy hook failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
+
+          echo "Deploy triggered successfully"
+
+      # Attend que le service réponde sur /health (Redis + PostgreSQL).
+      # Le cold start Render prend ~2-3 min selon la taille de l'image.
+      - name: Wait for Notification Service health check
+        run: |
+          SERVICE_URL="https://ecom-watch-notification.onrender.com"
+          MAX_ATTEMPTS=20
+          WAIT_SECONDS=15
+
+          echo "Polling $SERVICE_URL/health (max ${MAX_ATTEMPTS} attempts)"
+
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            HTTP_STATUS=$(curl \
+              --silent \
+              --output /dev/null \
+              --write-out "%{http_code}" \
+              --max-time 10 \
+              "$SERVICE_URL/health" || echo "000")
+
+            if [ "$HTTP_STATUS" = "200" ]; then
+              echo "Notification Service is live after $i attempt(s) — HTTP $HTTP_STATUS"
+              exit 0
+            fi
+
+            echo "Attempt $i/$MAX_ATTEMPTS — HTTP ${HTTP_STATUS} — next in ${WAIT_SECONDS}s"
+            sleep $WAIT_SECONDS
+          done
+
+          echo "Timeout: Notification Service did not respond after $((MAX_ATTEMPTS * WAIT_SECONDS))s"
+          exit 1
+
+      - name: Deployment summary
+        if: success()
+        run: |
+          echo "### Notification Service déployé ✅" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit** : \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch** : \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Auteur** : ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Health** : https://ecom-watch-notification.onrender.com/health" >> $GITHUB_STEP_SUMMARY

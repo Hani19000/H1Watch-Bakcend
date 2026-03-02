@@ -1,7 +1,13 @@
 # =============================================================================
 # CD — cart-service
 # Pipeline : migrate (Neon) → deploy (Render)
-# Secrets requis : NEON_DATABASE_URL_CART, RENDER_DEPLOY_HOOK_CART_URL, CART_SERVICE_URL
+#
+# Architecture DB : une seule base Neon, chaque service = un schéma.
+#
+# Secrets GitHub requis :
+#   NEON_DATABASE_URL              → même URL que les autres services
+#   RENDER_DEPLOY_HOOK_CART_URL    → Render dashboard → cart-service → Settings → Deploy Hook
+#   CART_SERVICE_URL               → https://ecom-watch-cart.onrender.com (URL publique du service)
 # =============================================================================
 
 name: CD — cart-service
@@ -22,19 +28,51 @@ jobs:
   migrate:
     name: Migration Neon — schéma cart
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
+
+      - name: Vérification des secrets requis
+        run: |
+          missing=0
+
+          if [ -z "${{ secrets.NEON_DATABASE_URL }}" ]; then
+            echo "❌ Secret manquant : NEON_DATABASE_URL"
+            echo "   → Settings → Secrets and variables → Actions → New repository secret"
+            missing=1
+          fi
+
+          if [ -z "${{ secrets.RENDER_DEPLOY_HOOK_CART_URL }}" ]; then
+            echo "❌ Secret manquant : RENDER_DEPLOY_HOOK_CART_URL"
+            echo "   → Render dashboard → cart-service → Settings → Deploy Hook → Copy URL"
+            missing=1
+          fi
+
+          if [ "$missing" = "1" ]; then
+            echo ""
+            echo "Configure les secrets manquants puis relance le workflow."
+            exit 1
+          fi
+
+          echo "✅ Tous les secrets sont configurés."
+
       - name: Installation du client psql
         run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
       - name: Vérification de la connexion Neon
-        run: psql "${{ secrets.NEON_DATABASE_URL_CART }}" -c "SELECT current_user, current_database();"
+        run: |
+          psql "${{ secrets.NEON_DATABASE_URL }}" -c "SELECT current_user, current_database();"
+          echo "Connexion Neon OK"
+
       - name: Migration 000 — schéma cart
         run: |
-          psql "${{ secrets.NEON_DATABASE_URL_CART }}" \
+          psql "${{ secrets.NEON_DATABASE_URL }}" \
             -f services/cart/migrations/000_neon_add_cart.sql
+          echo "Migration cart OK"
+
       - name: Vérification post-migration
         run: |
-          psql "${{ secrets.NEON_DATABASE_URL_CART }}" -c \
+          psql "${{ secrets.NEON_DATABASE_URL }}" -c \
             "SELECT tablename FROM pg_tables WHERE schemaname = 'cart' ORDER BY tablename;"
 
   deploy:
@@ -42,21 +80,35 @@ jobs:
     runs-on: ubuntu-latest
     needs: migrate
     environment: production
+
     steps:
       - name: Déclenchement du deploy hook Render
         run: |
           HTTP_STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" \
             --request POST "${{ secrets.RENDER_DEPLOY_HOOK_CART_URL }}")
-          echo "Statut HTTP : $HTTP_STATUS"
-          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ] && [ "$HTTP_STATUS" != "202" ]; then exit 1; fi
+          echo "Statut HTTP Render : $HTTP_STATUS"
+          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ] && [ "$HTTP_STATUS" != "202" ]; then
+            echo "❌ Deploy hook refusé (HTTP $HTTP_STATUS)"
+            exit 1
+          fi
+          echo "✅ Déploiement déclenché"
+
       - name: Attente de la disponibilité du cart-service
         run: |
           SERVICE_URL="${{ secrets.CART_SERVICE_URL }}"
           for i in $(seq 1 20); do
-            HTTP=$(curl --silent --output /dev/null --write-out "%{http_code}" --max-time 10 "$SERVICE_URL/health" || echo "000")
-            if [ "$HTTP" = "200" ]; then echo "cart-service opérationnel après $i tentative(s)"; exit 0; fi
-            echo "Tentative $i/20 — HTTP $HTTP — prochaine dans 15s"; sleep 15
-          done; exit 1
+            HTTP=$(curl --silent --output /dev/null --write-out "%{http_code}" \
+              --max-time 10 "$SERVICE_URL/health" || echo "000")
+            if [ "$HTTP" = "200" ]; then echo "✅ cart-service opérationnel après $i tentative(s)"; exit 0; fi
+            echo "Tentative $i/20 — HTTP $HTTP — prochaine dans 15s"
+            sleep 15
+          done
+          echo "❌ Timeout : cart-service ne répond pas"
+          exit 1
+
       - name: Résumé du déploiement
         if: success()
-        run: echo "### cart-service déployé ✅" >> $GITHUB_STEP_SUMMARY
+        run: |
+          echo "### cart-service déployé ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit** : \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Auteur** : ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY

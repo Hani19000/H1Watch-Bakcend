@@ -91,7 +91,11 @@ class AdminService {
             throw new AppError('Le paramètre days doit être compris entre 1 et 365', 400);
         }
 
-        return orderClient.getDailySalesHistory(parsed);
+        const result = await orderClient.getDailySalesHistory(parsed);
+        // orderClient extrait body.data de la réponse order-service :
+        // { data: { history: [...] } } → { history: [...] }
+        // extraire le tableau pour que le contrôleur puisse l'envelopper proprement dans { data: { history: [...] } } sans double nesting.
+        return result?.history ?? [];
     }
 
     /**
